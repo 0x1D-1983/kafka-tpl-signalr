@@ -1,0 +1,133 @@
+[
+    {
+      "Symbol": "DE",
+      "Market": "Day-Ahead",
+      "DeliveryArea": "DE-LU",
+      "Timestamp": "2025-02-20T10:00:00+01:00",
+      "Price": 42.35,
+      "Unit": "EUR/MWh",
+      "Contract": "P60"
+    },
+    {
+      "Symbol": "FR",
+      "Market": "Day-Ahead",
+      "DeliveryArea": "FR",
+      "Timestamp": "2025-02-20T10:15:00+01:00",
+      "Price": 38.12,
+      "Unit": "EUR/MWh",
+      "Contract": "P60"
+    },
+    {
+      "Symbol": "AT",
+      "Market": "Intraday",
+      "DeliveryArea": "AT",
+      "Timestamp": "2025-02-20T11:00:00+01:00",
+      "Price": 45.8,
+      "Unit": "EUR/MWh"
+    },
+    {
+      "Symbol": "DE",
+      "Market": "Day-Ahead",
+      "DeliveryArea": "DE-LU",
+      "Timestamp": "2025-02-20T11:30:00+01:00",
+      "Price": 41.9,
+      "Unit": "EUR/MWh",
+      "Contract": "P60"
+    },
+    {
+      "Symbol": "FR",
+      "Market": "Day-Ahead",
+      "DeliveryArea": "FR",
+      "Timestamp": "2025-02-20T12:00:00+01:00",
+      "Price": 39.55,
+      "Unit": "EUR/MWh",
+      "Contract": "P60"
+    },
+    {
+      "Symbol": "DE",
+      "Market": "Intraday",
+      "DeliveryArea": "DE-LU",
+      "Timestamp": "2025-02-20T12:15:00+01:00",
+      "Price": 43.2
+    },
+    {
+      "Symbol": "NL",
+      "Market": "Day-Ahead",
+      "DeliveryArea": "NL",
+      "Timestamp": "2025-02-20T13:00:00+01:00",
+      "Price": 44,
+      "Unit": "EUR/MWh",
+      "Contract": "P60"
+    },
+    {
+      "Symbol": "DE",
+      "Market": "Day-Ahead",
+      "DeliveryArea": "DE-LU",
+      "Timestamp": "2025-02-20T14:00:00+01:00",
+      "Price": 52.1,
+      "Unit": "EUR/MWh",
+      "Contract": "P60"
+    },
+    {
+      "Symbol": "FR",
+      "Market": "Intraday",
+      "DeliveryArea": "FR",
+      "Timestamp": "2025-02-20T14:30:00+01:00",
+      "Price": 47.33,
+      "Unit": "EUR/MWh"
+    },
+    {
+      "Symbol": "AT",
+      "Market": "Day-Ahead",
+      "DeliveryArea": "AT",
+      "Timestamp": "2025-02-20T15:00:00+01:00",
+      "Price": 48.75,
+      "Unit": "EUR/MWh",
+      "Contract": "P60"
+    },
+    {
+      "Symbol": "DE",
+      "Market": "Day-Ahead",
+      "DeliveryArea": "DE-LU",
+      "Timestamp": "2025-02-20T16:00:00+01:00",
+      "Price": 55,
+      "Unit": "EUR/MWh",
+      "Contract": "P60"
+    },
+    {
+      "Symbol": "FR",
+      "Market": "Day-Ahead",
+      "DeliveryArea": "FR",
+      "Timestamp": "2025-02-20T16:00:00+01:00",
+      "Price": 51.2,
+      "Unit": "EUR/MWh",
+      "Contract": "P60"
+    },
+    {
+      "Symbol": "CH",
+      "Market": "Day-Ahead",
+      "DeliveryArea": "CH",
+      "Timestamp": "2025-02-20T17:00:00+01:00",
+      "Price": 62.4,
+      "Unit": "EUR/MWh",
+      "Contract": "P60"
+    },
+    {
+      "Symbol": "DE",
+      "Market": "Day-Ahead",
+      "DeliveryArea": "DE-LU",
+      "Timestamp": "2025-02-20T18:00:00+01:00",
+      "Price": 68.9,
+      "Unit": "EUR/MWh",
+      "Contract": "P60"
+    },
+    {
+      "Symbol": "FR",
+      "Market": "Day-Ahead",
+      "DeliveryArea": "FR",
+      "Timestamp": "2025-02-20T18:00:00+01:00",
+      "Price": 65.1,
+      "Unit": "EUR/MWh",
+      "Contract": "P60"
+    }
+  ]
