@@ -1,0 +1,54 @@
+# Steady mock publisher for epex-market-data. Each tick emits one EpexMarketData record
+# for DeliveryArea DE and one for FR. Symbol matches the area so hub subscriptions receive them.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: epex-mock
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: epex-mock
+  template:
+    metadata:
+      labels:
+        app: epex-mock
+    spec:
+      nodeSelector:
+        pricestream.io/pool: app
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: producer
+          image: apache/kafka:3.9.1
+          command: ["/bin/bash", "/scripts/generate.sh"]
+          env:
+            - name: KAFKA_BOOTSTRAP
+              value: kafka:9092
+            - name: KAFKA_TOPIC
+              value: epex-market-data
+            - name: KAFKA_HEAP_OPTS
+              value: "-Xms64m -Xmx128m"
+            - name: INTERVAL_SECONDS
+              value: "1"
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+            limits:
+              cpu: 300m
+              memory: 384Mi
+      volumes:
+        - name: script
+          configMap:
+            name: epex-mock

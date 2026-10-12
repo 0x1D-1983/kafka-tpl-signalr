@@ -4,6 +4,7 @@ namespace: pricestream
 resources:
   - namespace.yaml
   - kafka
+  - mock
   - redis
   - pricestream
   - edge

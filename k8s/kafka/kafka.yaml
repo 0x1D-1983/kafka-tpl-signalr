@@ -108,5 +108,8 @@ spec:
         - podSelector:
             matchLabels:
               app: pricestream
+        - podSelector:
+            matchLabels:
+              app: epex-mock
       ports:
         - port: client

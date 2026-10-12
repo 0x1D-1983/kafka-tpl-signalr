@@ -48,6 +48,7 @@ k8s/
   pricestream/pricestream.yaml   3 stateless replicas, probes, PDB, NetworkPolicy
   redis/redis.yaml               SignalR backplane (pub/sub)
   kafka/kafka.yaml               single-node KRaft broker, 3 partitions
+  mock/                          publishes mock EpexMarketData for delivery areas DE and FR
   edge/                          Envoy: /hubs/* only, cookie affinity, active health checks
 scripts/cluster-up.sh            creates the cluster
 skaffold.yaml                    build + deploy
@@ -66,7 +67,7 @@ curl -si localhost:8080/health/ready                 # 404 from Envoy: not route
 kubectl port-forward svc/pricestream 8081:80         # skaffold dev does this; /health/* is here
 ```
 
-Publish a sample price (JSON shape in `PriceStream/sample-epex-messages.json`):
+The `epex-mock` deployment publishes a DE and an FR price every second (JSON shape in `PriceStream/sample-epex-messages.json`). To publish one message by hand:
 
 ```bash
 kubectl exec -i deploy/kafka -- /opt/kafka/bin/kafka-console-producer.sh \
