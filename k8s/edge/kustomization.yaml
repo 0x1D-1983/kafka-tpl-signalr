@@ -1,0 +1,10 @@
+# The ConfigMap name gets a content hash, so editing envoy.yaml rolls the Envoy pod automatically.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: pricestream
+resources:
+  - edge.yaml
+configMapGenerator:
+  - name: edge-envoy
+    files:
+      - envoy.yaml

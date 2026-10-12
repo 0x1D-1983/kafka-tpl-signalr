@@ -1,0 +1,151 @@
+# Stateless SignalR replicas. Each pod consumes a share of the Kafka topic (same consumer group)
+# and publishes symbol groups through the Redis backplane, so a client on any pod receives every
+# symbol it subscribed to. Pods hold no shared state: a reconnect lands on whichever replica is ready.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pricestream
+spec:
+  selector:
+    app: pricestream
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# Headless Service so Envoy's STRICT_DNS cluster sees one address per ready pod and can health-check
+# them individually. Unready pods (startup, Kafka/Redis down, terminating) are omitted.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pricestream-pods
+spec:
+  clusterIP: None
+  selector:
+    app: pricestream
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pricestream
+spec:
+  replicas: 3
+  minReadySeconds: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # A new pod is Ready before an old one is removed, so the Service never drops below 3.
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: pricestream
+  template:
+    metadata:
+      labels:
+        app: pricestream
+    spec:
+      nodeSelector:
+        pricestream.io/pool: app
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: pricestream
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: pricestream
+          image: pricestream
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: Production
+            - name: ASPNETCORE_HTTP_PORTS
+              value: "8080"
+            - name: Kafka__BootstrapServers
+              value: kafka:9092
+            - name: Kafka__Topic
+              value: epex-market-data
+            - name: Kafka__ConsumerGroupId
+              value: pricestream-signalr
+            # abortConnect=false: the process stays up while Redis starts; readiness stays false until it connects.
+            - name: Redis__Configuration
+              value: redis:6379,abortConnect=false
+            - name: Redis__InstanceName
+              value: pricestream
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+          # Give the load balancer time to stop sending new connections before SIGTERM closes WebSockets.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 10"]
+          # Probes call the pod IP directly, so /health/* works even though the edge proxy doesn't route it.
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+---
+# Voluntary disruptions (drain, eviction) may take at most one pod. Rolling updates use maxUnavailable: 0
+# and so stay within this budget.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pricestream
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: pricestream
+---
+# Only the edge Envoy may connect to the hubs. Kubelet probes and kubectl port-forward come from the node, not a pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pricestream
+spec:
+  podSelector:
+    matchLabels:
+      app: pricestream
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: edge-envoy
+      ports:
+        - port: http

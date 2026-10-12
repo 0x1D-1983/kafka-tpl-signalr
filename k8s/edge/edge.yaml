@@ -1,0 +1,80 @@
+# Edge Envoy proxy: the only public entry point. Kubelet probes call the PriceStream pod IP directly,
+# so they bypass the edge, which never routes /health/*.
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge
+spec:
+  type: NodePort
+  # Keep the client's source IP (no SNAT to the node).
+  externalTrafficPolicy: Local
+  selector:
+    app: edge-envoy
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      # Published on the host as localhost:8080 by extraPortMappings in k8s/kind-cluster.yaml.
+      nodePort: 30080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-envoy
+spec:
+  replicas: 1
+  minReadySeconds: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: edge-envoy
+  template:
+    metadata:
+      labels:
+        app: edge-envoy
+    spec:
+      # Same node as the kind port mapping; externalTrafficPolicy: Local only accepts traffic there.
+      nodeSelector:
+        pricestream.io/pool: app
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: envoy
+          image: envoyproxy/envoy:distroless-v1.39.1
+          args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: config
+              mountPath: /etc/envoy
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          # The admin interface is bound to localhost, so probes check the listener socket.
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: edge-envoy

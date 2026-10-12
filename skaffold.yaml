@@ -1,0 +1,28 @@
+apiVersion: skaffold/v4beta13
+kind: Config
+metadata:
+  name: pricestream
+build:
+  tagPolicy:
+    inputDigest: {}
+  artifacts:
+    - image: pricestream
+      context: PriceStream
+      docker:
+        dockerfile: Dockerfile
+  local:
+    push: false
+manifests:
+  kustomize:
+    paths:
+      - k8s
+deploy:
+  kubectl: {}
+# Developer access to the PriceStream Service, bypassing the edge (so /health/* is reachable too).
+# The public edge is on localhost:8080 via the kind port mapping.
+portForward:
+  - resourceType: service
+    resourceName: pricestream
+    namespace: pricestream
+    port: 80
+    localPort: 8081

@@ -48,7 +48,13 @@ export function usePriceStream(hubUrl) {
     const url = hubUrl || '/hubs/pricestream'
     const connection = new signalR.HubConnectionBuilder()
       .withUrl(url)
-      .withAutomaticReconnect([0, 2000, 5000, 10000])
+      // Keep trying. A dead pod is dropped by the load balancer; the next attempt lands on a healthy one.
+      .withAutomaticReconnect({
+        nextRetryDelayInMilliseconds(retryContext) {
+          const delays = [0, 2000, 5000, 10000]
+          return delays[Math.min(retryContext.previousRetryCount, delays.length - 1)]
+        },
+      })
       .build()
 
     connection.on('PriceUpdate', (data) => {

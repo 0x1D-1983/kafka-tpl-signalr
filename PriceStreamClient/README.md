@@ -18,7 +18,13 @@ npm install
    npm run dev
    ```
 
-3. Open http://localhost:5173. Vite proxies `/hubs` to the backend, so the SignalR connection works without CORS.
+3. Open http://localhost:5173. Vite proxies `/hubs` to the backend, so the SignalR connection works without CORS. A dropped connection keeps retrying, then the app resubscribes to the symbols stored in `localStorage`.
+
+   Against the kind cluster (edge on port 8080):
+
+   ```bash
+   VITE_PROXY_TARGET=http://localhost:8080 npm run dev
+   ```
 
 ## Backend on a different host
 

@@ -1,0 +1,93 @@
+# Edge proxy: routes /hubs/* to PriceStream and answers everything else with 404.
+# The affinity cookie pins negotiate and the WebSocket to one pod. When that pod leaves the
+# healthy set, the same cookie hashes onto a remaining pod.
+admin:
+  # Localhost only: stats and config dumps are not exposed outside the pod.
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 }
+static_resources:
+  listeners:
+    - name: http
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8080 }
+      per_connection_buffer_limit_bytes: 65536
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: edge
+                use_remote_address: true
+                # Normalise before routing so /hubs/../health or /hubs/%2F.. can't reach unrouted paths.
+                normalize_path: true
+                merge_slashes: true
+                path_with_escaped_slashes_action: REJECT_REQUEST
+                request_headers_timeout: 10s
+                # SignalR server pings reset this. 0 would keep a dead socket open until TCP gives up.
+                stream_idle_timeout: 3600s
+                upgrade_configs:
+                  - upgrade_type: websocket
+                common_http_protocol_options:
+                  idle_timeout: 60s
+                  headers_with_underscores_action: REJECT_REQUEST
+                route_config:
+                  name: edge
+                  virtual_hosts:
+                    - name: pricestream
+                      domains: ["*"]
+                      routes:
+                        - match: { path_separated_prefix: /hubs }
+                          route:
+                            cluster: pricestream
+                            # 0 disables the route timeout so a WebSocket is not cut off after a fixed duration.
+                            timeout: 0s
+                            hash_policy:
+                              - cookie:
+                                  name: pricestream-affinity
+                                  ttl: 86400s
+                                  path: /hubs
+                            # Negotiate is safe to retry until a response starts. Covers a pod that
+                            # disappeared between DNS refresh and the connection attempt.
+                            retry_policy:
+                              retry_on: connect-failure,refused-stream,reset
+                              num_retries: 2
+                              host_selection_retry_max_attempts: 3
+                              retry_host_predicate:
+                                - name: envoy.retry_host_predicates.previous_hosts
+                                  typed_config:
+                                    "@type": type.googleapis.com/envoy.extensions.retry.host.previous_hosts.v3.PreviousHostsPredicate
+                        - match: { prefix: / }
+                          direct_response: { status: 404 }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+    - name: pricestream
+      type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      dns_refresh_rate: 2s
+      connect_timeout: 2s
+      lb_policy: RING_HASH
+      common_lb_config:
+        # Never send traffic to unhealthy pods just because too few hosts are healthy.
+        healthy_panic_threshold:
+          value: 0
+        # A new pod IP is not used until /health/ready succeeds.
+        ignore_new_hosts_until_first_hc: true
+      health_checks:
+        - timeout: 1s
+          interval: 2s
+          unhealthy_threshold: 2
+          healthy_threshold: 1
+          http_health_check:
+            path: /health/ready
+      load_assignment:
+        cluster_name: pricestream
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: pricestream-pods.pricestream.svc.cluster.local
+                      port_value: 8080

@@ -14,7 +14,7 @@ EPEX market data flows from Kafka through a TPL Dataflow pipeline and is exposed
 
 - **Stateless pods**: No in-memory shared state. Subscriptions are per-connection; when a client reconnects (same or different pod), it must call `Subscribe(symbols)` again.
 - **Kafka consumer group**: Same `ConsumerGroupId` on all pods so the topic is partitioned across instances. No single point of failure for consumption.
-- **Load balancer**: Point liveness to `/health/live`, readiness to `/health/ready`. Use sticky sessions for WebSocket (SignalR) if your LB supports it, so a reconnecting client can land on the same pod when possible.
+- **Load balancer**: Point liveness to `/health/live`, readiness to `/health/ready`. Sticky sessions keep negotiate and the WebSocket on the same pod. When that pod is gone, the next connection is routed to a healthy one.
 
 ## Client reconnection and resubscription
 
@@ -64,7 +64,20 @@ JSON per message, matching `EpexMarketData`:
 
 ## Kubernetes
 
-- **Liveness probe**: `GET /health/live` → 200 = healthy.
-- **Readiness probe**: `GET /health/ready` → 200 when Kafka (and Redis, if backplane enabled) is reachable; use for Service/Ingress so only ready pods receive traffic.
-- Use the same `ConsumerGroupId` for all replicas so partition assignment is shared and there is no single point of failure.
-- When running multiple pods and clients subscribe to multiple symbols, set `Redis:Configuration` so the Redis backplane is enabled; otherwise a client may only receive updates for symbols consumed by the pod it is connected to.
+Manifests under [`k8s/`](../k8s/) run three stateless replicas behind Envoy, with Redis as the SignalR backplane and a single-node Kafka broker. See the [root README](../README.md#kubernetes-kind--skaffold) for how to start the kind cluster.
+
+- **Liveness probe**: `GET /health/live` → 200 = process is up. A crash restarts the container.
+- **Readiness probe**: `GET /health/ready` → 200 when Kafka and Redis are reachable. The Service and Envoy only send traffic to ready pods.
+- **Replicas**: 3, rolling update `maxUnavailable: 0` / `maxSurge: 1`, PodDisruptionBudget `minAvailable: 2`. A deploy brings a new pod up before taking an old one down.
+- **Same `ConsumerGroupId`** on every replica so partitions are shared. The broker auto-creates `epex-market-data` with 3 partitions.
+- **Redis**: `Redis__Configuration` is set in the Deployment, so group messages published on one pod reach clients connected to the others.
+
+### When a pod dies
+
+1. The process crashes. Kubernetes restarts the container, and the dead process resets that pod's sockets, so its clients disconnect.
+2. Readiness fails, so the pod leaves the headless Service. Envoy's health check (`/health/ready` every 2s, two failures) stops choosing it for new connections.
+3. Clients reconnect (`withAutomaticReconnect` in the React client) and call `Subscribe` again.
+4. The affinity cookie hashes to a remaining healthy pod.
+5. Whichever pod consumes a symbol publishes it through Redis, so the client keeps receiving updates.
+
+During a rolling deploy the same path runs one pod at a time, and at least two replicas stay available.
