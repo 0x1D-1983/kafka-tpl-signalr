@@ -1,7 +1,5 @@
-using System.Threading.Tasks.Dataflow;
 using Confluent.Kafka;
 using Microsoft.Extensions.Options;
-using PriceStream.Models;
 
 namespace PriceStream.Services;
 
