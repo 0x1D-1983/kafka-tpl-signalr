@@ -18,7 +18,7 @@ npm install
    npm run dev
    ```
 
-3. Open http://localhost:5173. Vite proxies `/hubs` to the backend, so the SignalR connection works without CORS. A dropped connection keeps retrying, then the app resubscribes to the symbols stored in `localStorage`.
+3. Open http://localhost:5173. Vite proxies `/hubs` to the backend, so the SignalR connection works without CORS. Price updates arrive only after you click Subscribe, and only for the symbols in the textbox. A dropped connection keeps retrying, then resubscribes to those same symbols.
 
    Against the kind cluster (edge on port 8080):
 

@@ -3,37 +3,31 @@ import * as signalR from '@microsoft/signalr'
 
 const STORAGE_KEY = 'pricestream-symbols'
 
-function loadSavedSymbols() {
-  try {
-    const s = localStorage.getItem(STORAGE_KEY)
-    return s ? s.split(',').map((x) => x.trim()).filter(Boolean) : []
-  } catch {
-    return []
-  }
+function normalizeSymbols(symbols) {
+  return [...new Set(symbols.map((s) => String(s).trim().toUpperCase()).filter(Boolean))]
 }
 
 export function usePriceStream(hubUrl) {
-  const initialRef = useRef(null)
-  if (initialRef.current === null) initialRef.current = loadSavedSymbols()
   const [connectionState, setConnectionState] = useState(signalR.HubConnectionState.Disconnected)
   const [updates, setUpdates] = useState([])
-  const [subscribedSymbols, setSubscribedSymbols] = useState(initialRef.current)
+  const [subscribedSymbols, setSubscribedSymbols] = useState([])
   const connectionRef = useRef(null)
-  const symbolsRef = useRef([...initialRef.current])
+  const symbolsRef = useRef([])
 
   const subscribe = useCallback(async (symbols) => {
-    const normalized = symbols
-      .map((s) => String(s).trim().toUpperCase())
-      .filter(Boolean)
-    if (normalized.length === 0) return
+    const normalized = normalizeSymbols(symbols)
+    const previous = symbolsRef.current
+    const removed = previous.filter((s) => !normalized.includes(s))
     symbolsRef.current = normalized
     try {
       localStorage.setItem(STORAGE_KEY, normalized.join(','))
     } catch (_) {}
     setSubscribedSymbols(normalized)
+    setUpdates((prev) => prev.filter((u) => normalized.includes(String(u.symbol ?? '').toUpperCase())))
     const conn = connectionRef.current
     if (conn && conn.state === signalR.HubConnectionState.Connected) {
-      await conn.invoke('Subscribe', normalized)
+      if (removed.length > 0) await conn.invoke('Unsubscribe', removed)
+      if (normalized.length > 0) await conn.invoke('Subscribe', normalized)
     }
   }, [])
 
@@ -58,6 +52,8 @@ export function usePriceStream(hubUrl) {
       .build()
 
     connection.on('PriceUpdate', (data) => {
+      const symbol = String(data?.symbol ?? '').toUpperCase()
+      if (!symbolsRef.current.includes(symbol)) return
       setUpdates((prev) => [{ ...data, id: crypto.randomUUID() }, ...prev].slice(0, 200))
     })
 
@@ -74,21 +70,22 @@ export function usePriceStream(hubUrl) {
       setConnectionState(signalR.HubConnectionState.Disconnected)
     })
 
+    let stopped = false
     connection
       .start()
       .then(() => {
+        if (stopped) return
         setConnectionState(signalR.HubConnectionState.Connected)
-        if (symbolsRef.current.length > 0) {
-          return connection.invoke('Subscribe', symbolsRef.current)
-        }
       })
       .catch((err) => {
+        if (stopped) return
         console.error('SignalR connection failed', err)
         setConnectionState(signalR.HubConnectionState.Disconnected)
       })
 
     connectionRef.current = connection
     return () => {
+      stopped = true
       connection.stop()
       connectionRef.current = null
     }

@@ -23,7 +23,7 @@ Connection state (subscribed symbols) is **not** shared across pods or persisted
 1. Client should store desired symbols locally (e.g. `localStorage`).
 2. On `onreconnected` (or after `start()`), call `Subscribe(symbols)` again with that list.
 
-The **React client** (`PriceStreamClient/`) does this: it saves symbols to `localStorage` and resubscribes on reconnect.
+The **React client** (`PriceStreamClient/`) subscribes only to the symbols submitted from the textbox, then calls `Subscribe` again with that list on reconnect.
 
 ## Configuration
 
