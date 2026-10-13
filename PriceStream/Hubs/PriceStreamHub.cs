@@ -26,11 +26,9 @@ public sealed class PriceStreamHub : Hub
             .Distinct()
             .ToArray();
 
-        foreach (var symbol in normalized)
-            Groups.AddToGroupAsync(Context.ConnectionId, SymbolGroup(symbol), Context.ConnectionAborted);
-
         _logger.LogDebug("Connection {ConnectionId} subscribed to {Symbols}", Context.ConnectionId, string.Join(", ", normalized));
-        return Task.CompletedTask;
+        return Task.WhenAll(normalized.Select(symbol =>
+            Groups.AddToGroupAsync(Context.ConnectionId, SymbolGroup(symbol), Context.ConnectionAborted)));
     }
 
     /// <summary>

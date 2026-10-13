@@ -68,6 +68,10 @@ public sealed class KafkaEpexConsumerService : BackgroundService
 public sealed class KafkaOptions
 {
     public const string SectionName = "Kafka";
+
+    /// <summary>When false, this process does not consume Kafka and Kafka is omitted from readiness.</summary>
+    public bool Enabled { get; set; } = true;
+
     public string BootstrapServers { get; set; } = "localhost:9092";
     public string Topic { get; set; } = "epex-market-data";
     public string ConsumerGroupId { get; set; } = "pricestream-signalr";

@@ -36,9 +36,13 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _link = _pipeline.LinkTo(_targetBlock);
-
-        // Keep running until shutdown; the block will complete when pipeline completes.
-        await _targetBlock.Completion;
+        try
+        {
+            await Task.Delay(Timeout.Infinite, stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+        }
     }
 
     public override void Dispose()
