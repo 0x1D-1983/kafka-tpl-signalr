@@ -144,7 +144,7 @@ public sealed class SnapshotTests
         public void Publish(EpexMarketData price)
         {
             var pipeline = _app.Services.GetRequiredService<EpexDataflowPipeline>();
-            if (!pipeline.Post(JsonSerializer.Serialize(price)))
+            if (!pipeline.Post(price))
                 throw new InvalidOperationException($"Pipeline dropped {price.Symbol}.");
         }
 

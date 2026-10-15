@@ -257,7 +257,7 @@ sealed class PriceStreamPod : IAsyncDisposable
     public void Publish(string symbol, decimal price)
     {
         var pipeline = _app.Services.GetRequiredService<EpexDataflowPipeline>();
-        var json = JsonSerializer.Serialize(new EpexMarketData
+        var message = new EpexMarketData
         {
             Symbol = symbol,
             Market = "Day-Ahead",
@@ -266,8 +266,8 @@ sealed class PriceStreamPod : IAsyncDisposable
             Price = price,
             Unit = "EUR/MWh",
             Contract = "P60",
-        });
-        if (!pipeline.Post(json))
+        };
+        if (!pipeline.Post(message))
             throw new InvalidOperationException($"Pod {Name} dropped the {symbol} update.");
     }
 

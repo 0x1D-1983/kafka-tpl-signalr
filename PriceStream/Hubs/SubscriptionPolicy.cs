@@ -94,20 +94,22 @@ public sealed class SubscriptionPolicy : IDisposable
     public string? Normalize(string? raw, out string? rejection)
     {
         var symbol = raw?.Trim().ToUpperInvariant() ?? string.Empty;
+        rejection = Check(symbol);
+        return rejection is null ? symbol : null;
+    }
+
+    /// <summary>
+    /// For symbols already trimmed and upper-cased (e.g. parsed by <c>EpexMessageParser</c>).
+    /// </summary>
+    public bool IsAllowed(string symbol) => Check(symbol) is null;
+
+    private string? Check(string symbol)
+    {
         if (symbol.Length == 0 || symbol.Length > MaxSymbolLength || !Matches(symbol))
-        {
-            rejection = SubscriptionRejection.Invalid;
-            return null;
-        }
-
+            return SubscriptionRejection.Invalid;
         if (_allowed.Count > 0 && !_allowed.Contains(symbol))
-        {
-            rejection = SubscriptionRejection.NotAllowed;
-            return null;
-        }
-
-        rejection = null;
-        return symbol;
+            return SubscriptionRejection.NotAllowed;
+        return null;
     }
 
     /// <summary>

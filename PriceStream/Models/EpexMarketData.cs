@@ -1,3 +1,6 @@
+using System.Text.Json.Serialization;
+using PriceStream.Services;
+
 namespace PriceStream.Models;
 
 /// <summary>
@@ -5,6 +8,8 @@ namespace PriceStream.Models;
 /// </summary>
 public sealed class EpexMarketData
 {
+    /// <summary>Trimmed and upper-case when parsed from JSON.</summary>
+    [JsonConverter(typeof(SymbolJsonConverter))]
     public required string Symbol { get; init; }
     public required string Market { get; init; }
     public required string DeliveryArea { get; init; }

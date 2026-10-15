@@ -24,7 +24,7 @@ public sealed class PipelineFailureTests
         var target = new ActionBlock<EpexMarketData>(_ => { });
         using var link = pipeline.LinkTo(target);
 
-        Assert.True(pipeline.Post(SampleJson("DE", 10m)));
+        Assert.True(pipeline.Post(Sample("DE", 10m)));
         pipeline.Complete();
         pipeline.Complete();
 
@@ -51,10 +51,10 @@ public sealed class PipelineFailureTests
         }, new ExecutionDataflowBlockOptions { BoundedCapacity = 1, MaxDegreeOfParallelism = 1 });
         using var link = pipeline.LinkTo(target);
 
-        Assert.True(pipeline.Post(SampleJson("DE", 1)));
+        Assert.True(pipeline.Post(Sample("DE", 1)));
         await processingFirst.Task.WaitAsync(TimeSpan.FromSeconds(2));
         foreach (var symbol in new[] { "FR", "AT", "NL", "CH" })
-            Assert.True(pipeline.Post(SampleJson(symbol, 1)));
+            Assert.True(pipeline.Post(Sample(symbol, 1)));
 
         release.TrySetResult();
         pipeline.Complete();
@@ -69,7 +69,7 @@ public sealed class PipelineFailureTests
     {
         var pipeline = new EpexDataflowPipeline();
         foreach (var symbol in new[] { "DE", "FR", "AT" })
-            Assert.True(pipeline.Post(SampleJson(symbol, 1)));
+            Assert.True(pipeline.Post(Sample(symbol, 1)));
 
         var received = new List<string>();
         var target = new ActionBlock<EpexMarketData>(message =>
@@ -85,12 +85,12 @@ public sealed class PipelineFailureTests
     }
 
     [Fact]
-    public async Task Faulted_parse_block_is_named()
+    public async Task Faulted_queue_is_named()
     {
         var pipeline = new EpexDataflowPipeline();
         Assert.Empty(pipeline.FaultedBlocks);
 
-        Fault(pipeline, "_parseBlock");
+        Fault(pipeline, "_queue");
         try
         {
             await pipeline.Completion.WaitAsync(TimeSpan.FromSeconds(2));
@@ -99,7 +99,7 @@ public sealed class PipelineFailureTests
         {
         }
 
-        Assert.Contains("parse", pipeline.FaultedBlocks);
+        Assert.Contains("queue", pipeline.FaultedBlocks);
     }
 
     [Fact]
@@ -114,14 +114,14 @@ public sealed class PipelineFailureTests
         var stopping = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         running.App.Lifetime.ApplicationStopping.Register(() => stopping.TrySetResult());
 
-        Fault(running.App.Services.GetRequiredService<EpexDataflowPipeline>(), "_parseBlock");
+        Fault(running.App.Services.GetRequiredService<EpexDataflowPipeline>(), "_queue");
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, await StatusAsync(http, $"{running.Url}/health/live"));
         Assert.Equal(HttpStatusCode.ServiceUnavailable, await StatusAsync(http, $"{running.Url}/health/ready"));
 
         var result = await ActivatorUtilities.CreateInstance<PipelineHealthCheck>(running.App.Services)
             .CheckHealthAsync(new HealthCheckContext());
-        Assert.Contains("parse", result.Description);
+        Assert.Contains("queue", result.Description);
 
         await stopping.Task.WaitAsync(TimeSpan.FromSeconds(10));
     }
@@ -153,7 +153,7 @@ public sealed class PipelineFailureTests
         var broadcaster = running.App.Services.GetRequiredService<SignalRPriceBroadcaster>();
         var targetCompletion = Block(broadcaster, "_targetBlock").Completion;
 
-        Assert.True(pipeline.Post(SampleJson("DE", 42m)));
+        Assert.True(pipeline.Post(Sample("DE", 42m)));
         Assert.False(targetCompletion.IsCompleted);
 
         await running.App.StopAsync().WaitAsync(TimeSpan.FromSeconds(3));
@@ -170,8 +170,8 @@ public sealed class PipelineFailureTests
         var broadcaster = running.App.Services.GetRequiredService<SignalRPriceBroadcaster>();
         var targetCompletion = Block(broadcaster, "_targetBlock").Completion;
 
-        Assert.True(pipeline.Post("""{"Symbol":null,"Market":"Day-Ahead","DeliveryArea":"DE","Timestamp":"2026-10-13T12:00:00Z","Price":1}"""));
-        Assert.True(pipeline.Post(SampleJson("DE", 42m)));
+        Assert.True(pipeline.Post(new EpexMarketData { Symbol = null!, Market = "Day-Ahead", DeliveryArea = "DE", Price = 1 }));
+        Assert.True(pipeline.Post(Sample("DE", 42m)));
 
         await running.App.StopAsync().WaitAsync(TimeSpan.FromSeconds(3));
 
@@ -196,7 +196,7 @@ public sealed class PipelineFailureTests
         foreach (var symbol in symbols)
         {
             for (var price = 1; price <= 3; price++)
-                Assert.True(pipeline.Post(SampleJson(symbol, price)));
+                Assert.True(pipeline.Post(Sample(symbol, price)));
         }
 
         await broadcaster.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
@@ -225,8 +225,8 @@ public sealed class PipelineFailureTests
         throw new InvalidOperationException($"Health endpoint {url} did not respond.", last);
     }
 
-    private static string SampleJson(string symbol, decimal price) =>
-        JsonSerializer.Serialize(new EpexMarketData
+    private static EpexMarketData Sample(string symbol, decimal price) =>
+        new()
         {
             Symbol = symbol,
             Market = "Day-Ahead",
@@ -235,7 +235,7 @@ public sealed class PipelineFailureTests
             Price = price,
             Unit = "EUR/MWh",
             Contract = "P60",
-        });
+        };
 
     private static void Fault(object owner, string fieldName) =>
         Block(owner, fieldName).Fault(new InvalidOperationException($"test fault: {fieldName}"));

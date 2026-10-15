@@ -164,7 +164,7 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
 
     private static int LaneIndex(string symbol)
     {
-        var hash = StringComparer.OrdinalIgnoreCase.GetHashCode(symbol);
+        var hash = StringComparer.Ordinal.GetHashCode(symbol);
         return (hash & int.MaxValue) % LaneCount;
     }
 
@@ -172,7 +172,9 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(message.Symbol))
+            // The parser rejects messages without a symbol. This guards code that posts objects
+            // directly: a throw here would fault the router and stop broadcasting.
+            if (string.IsNullOrEmpty(message.Symbol))
             {
                 _logger.LogWarning("Dropping price update with no symbol");
                 return Task.CompletedTask;
@@ -192,28 +194,21 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
         string? group = null;
         try
         {
-            // System.Text.Json leaves Symbol null when the JSON value is null. That must not
-            // escape this delegate: a thrown ActionBlock stays faulted and stops broadcasting.
+            // Nothing may escape this delegate: a thrown ActionBlock stays faulted and stops broadcasting.
+            // Symbol is already trimmed and upper-case (EpexMessageParser) and non-empty (RouteAsync).
             var symbol = message.Symbol;
-            if (string.IsNullOrWhiteSpace(symbol))
-            {
-                _logger.LogWarning("Dropping price update with no symbol");
-                return;
-            }
-
-            var normalized = symbol.Trim().ToUpperInvariant();
-            group = PriceStreamHub.SymbolGroup(normalized);
+            group = PriceStreamHub.SymbolGroup(symbol);
 
             // Only symbols a client could subscribe to are cached, so Kafka cannot grow it past the allow-list.
-            if (_policy.Normalize(normalized, out _) is not null)
+            if (_policy.IsAllowed(symbol))
             {
                 try
                 {
-                    await _lastPrices.SetAsync(normalized, message);
+                    await _lastPrices.SetAsync(symbol, message);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Failed to cache last price for {Symbol}", normalized);
+                    _logger.LogWarning(ex, "Failed to cache last price for {Symbol}", symbol);
                 }
             }
 

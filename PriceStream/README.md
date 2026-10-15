@@ -5,7 +5,8 @@ EPEX market data flows from Kafka through a TPL Dataflow pipeline and is exposed
 ## Architecture
 
 - **Kafka**: Single topic (e.g. `epex-market-data`). **Every pod reads every partition** and sends only to its own connections, so no backplane is needed. Partitions are assigned manually (no consumer group membership, no commits), so scaling or restarting a pod never triggers a rebalance. The cost is that Kafka read bandwidth grows with the replica count.
-- **TPL Dataflow**: Parse JSON → bounded queue → per-symbol lanes that send to SignalR groups. Backpressure via bounded capacity.
+- **Parsing**: The Kafka value deserializer parses JSON straight from librdkafka's buffer (`ReadOnlySpan<byte>`, source-generated `JsonSerializerContext`), with no intermediate `byte[]` or `string`. Symbols are trimmed and upper-cased there; payloads that are not valid or have no symbol are skipped.
+- **TPL Dataflow**: bounded queue → per-symbol lanes that send to SignalR groups. Backpressure via bounded capacity.
 - **SignalR**: Hub `PriceStreamHub` at `/hubs/pricestream`. Methods: `Subscribe(symbols)`, `Unsubscribe(symbols)`, both returning `{ accepted, rejected: [{ symbol, reason }] }`. Clients receive `PriceUpdate` with EPEX payload.
 - **Health**: `/health/live` (liveness: process up, pipeline not faulted), `/health/ready` (readiness: Kafka reachable and startup replay finished). Use readiness for load balancer so traffic only goes to pods that can serve.
 - **Snapshot on subscribe**: Each tick is stored in memory as the last price for its symbol. `Subscribe` sends the cached price as a `PriceUpdate` for each newly added symbol, so a client does not wait for the next tick. An older source timestamp never replaces a newer one.

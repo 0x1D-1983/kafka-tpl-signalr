@@ -1,6 +1,7 @@
 using Confluent.Kafka;
 using Microsoft.Extensions.Options;
 using PriceStream.Hubs;
+using PriceStream.Models;
 
 namespace PriceStream.Services;
 
@@ -61,7 +62,9 @@ public sealed class KafkaEpexConsumerService : BackgroundService
             EnablePartitionEof = true
         };
 
-        using var consumer = new ConsumerBuilder<Ignore, string>(config).Build();
+        using var consumer = new ConsumerBuilder<Ignore, EpexMarketData?>(config)
+            .SetValueDeserializer(new EpexMarketDataDeserializer())
+            .Build();
         using var admin = new DependentAdminClientBuilder(consumer.Handle).Build();
 
         // Partition -> first offset that is live. Earlier offsets are replay.
@@ -85,7 +88,7 @@ public sealed class KafkaEpexConsumerService : BackgroundService
                     MarkCaughtUpIfDone(pending);
                 }
 
-                ConsumeResult<Ignore, string>? result;
+                ConsumeResult<Ignore, EpexMarketData?>? result;
                 try
                 {
                     result = consumer.Consume(TimeSpan.FromSeconds(1));
@@ -113,7 +116,11 @@ public sealed class KafkaEpexConsumerService : BackgroundService
                 if (result is null || result.IsPartitionEOF || result.Offset.Value < liveFrom.GetValueOrDefault(result.TopicPartition))
                     continue;
 
-                var accepted = _pipeline.Post(result.Message.Value ?? string.Empty);
+                // Null when the payload was not a valid EPEX message.
+                if (result.Message.Value is not { } message)
+                    continue;
+
+                var accepted = _pipeline.Post(message);
                 if (!accepted)
                     _logger.LogWarning("Pipeline backpressure: message dropped for offset {Offset}", result.Offset.Value);
             }
@@ -132,7 +139,7 @@ public sealed class KafkaEpexConsumerService : BackgroundService
     /// that appear later start at the beginning, because everything in them is new.
     /// </summary>
     private bool TryAssignNewPartitions(
-        IConsumer<Ignore, string> consumer,
+        IConsumer<Ignore, EpexMarketData?> consumer,
         IAdminClient admin,
         Dictionary<TopicPartition, long> liveFrom,
         HashSet<TopicPartition> pending)
@@ -183,7 +190,7 @@ public sealed class KafkaEpexConsumerService : BackgroundService
     }
 
     private List<TopicPartitionOffset> ReplayStart(
-        IConsumer<Ignore, string> consumer,
+        IConsumer<Ignore, EpexMarketData?> consumer,
         List<TopicPartition> partitions,
         Dictionary<TopicPartition, long> liveFrom,
         HashSet<TopicPartition> pending)
@@ -210,21 +217,18 @@ public sealed class KafkaEpexConsumerService : BackgroundService
         }).ToList();
     }
 
-    private async Task ReplayAsync(string? raw)
+    private async Task ReplayAsync(EpexMarketData? message)
     {
-        if (!EpexDataflowPipeline.TryParse(raw, out var message))
-            return;
-        var symbol = _policy.Normalize(message.Symbol, out _);
-        if (symbol is null)
+        if (message is null || !_policy.IsAllowed(message.Symbol))
             return;
 
         try
         {
-            await _lastPrices.SetAsync(symbol, message);
+            await _lastPrices.SetAsync(message.Symbol, message);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to cache replayed price for {Symbol}", symbol);
+            _logger.LogWarning(ex, "Failed to cache replayed price for {Symbol}", message.Symbol);
         }
     }
 

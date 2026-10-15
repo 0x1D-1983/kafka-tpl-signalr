@@ -4,43 +4,30 @@ using PriceStream.Models;
 namespace PriceStream.Services;
 
 /// <summary>
-/// Parses Kafka payloads and queues every accepted update for the linked target.
-/// Post returns false once the bounded queue is full. A full SignalR target postpones
-/// and the queue retains the message, so one slow symbol cannot overwrite another.
+/// Queues every accepted update for the linked target. Messages arrive already parsed (see
+/// <see cref="EpexMessageParser"/>). Post returns false once the bounded queue is full. A full
+/// SignalR target postpones and the queue retains the message, so one slow symbol cannot
+/// overwrite another.
 /// </summary>
 public sealed class EpexDataflowPipeline
 {
-    private readonly TransformManyBlock<string, EpexMarketData> _parseBlock;
+    // BroadcastBlock keeps a single value and overwrites it when the target postpones.
+    // A buffer retains every message and applies backpressure instead.
     private readonly BufferBlock<EpexMarketData> _queue;
     private int _completed;
 
     public EpexDataflowPipeline()
     {
-        _parseBlock = new TransformManyBlock<string, EpexMarketData>(
-            ParseEpexMessages,
-            new ExecutionDataflowBlockOptions
-            {
-                MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
-                BoundedCapacity = 1000,
-                // Hold later results until earlier inputs finish so the queue stays in arrival order.
-                EnsureOrdered = true
-            });
-
-        // BroadcastBlock keeps a single value and overwrites it when the target postpones.
-        // A buffer retains every message and applies backpressure instead.
         _queue = new BufferBlock<EpexMarketData>(new DataflowBlockOptions { BoundedCapacity = 1000 });
-
-        _parseBlock.LinkTo(_queue, new DataflowLinkOptions { PropagateCompletion = true });
-        ObserveFault(_parseBlock.Completion);
         ObserveFault(_queue.Completion);
     }
 
     /// <summary>
-    /// Post a raw message (e.g. JSON) from Kafka. Returns true if accepted.
+    /// Post a parsed message. Returns true if accepted.
     /// </summary>
-    public bool Post(string rawMessage)
+    public bool Post(EpexMarketData message)
     {
-        return _parseBlock.Post(rawMessage);
+        return _queue.Post(message);
     }
 
     /// <summary>
@@ -53,7 +40,7 @@ public sealed class EpexDataflowPipeline
     }
 
     /// <summary>
-    /// Accepts no further messages. Blocks already queued are still processed, then completion
+    /// Accepts no further messages. Messages already queued are still delivered, then completion
     /// propagates to linked targets so they can drain.
     /// </summary>
     public void Complete()
@@ -63,7 +50,7 @@ public sealed class EpexDataflowPipeline
 
         try
         {
-            _parseBlock.Complete();
+            _queue.Complete();
         }
         catch (InvalidOperationException)
         {
@@ -75,21 +62,10 @@ public sealed class EpexDataflowPipeline
     /// Names of pipeline blocks whose completion has faulted. Empty while the pipeline is running
     /// or after a clean completion. A faulted block does not recover.
     /// </summary>
-    public IReadOnlyList<string> FaultedBlocks
-    {
-        get
-        {
-            var parseFaulted = _parseBlock.Completion.IsFaulted;
-            var queueFaulted = _queue.Completion.IsFaulted;
-            if (!parseFaulted && !queueFaulted)
-                return Array.Empty<string>();
-            if (parseFaulted && queueFaulted)
-                return ["parse", "queue"];
-            return parseFaulted ? ["parse"] : ["queue"];
-        }
-    }
+    public IReadOnlyList<string> FaultedBlocks =>
+        _queue.Completion.IsFaulted ? ["queue"] : Array.Empty<string>();
 
-    public Task Completion => _parseBlock.Completion;
+    public Task Completion => _queue.Completion;
 
     private static void ObserveFault(Task completion) =>
         _ = completion.ContinueWith(
@@ -97,22 +73,4 @@ public sealed class EpexDataflowPipeline
             CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
-
-    public static bool TryParse(string? raw, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out EpexMarketData? message)
-    {
-        message = null;
-        if (string.IsNullOrWhiteSpace(raw)) return false;
-        try
-        {
-            message = System.Text.Json.JsonSerializer.Deserialize<EpexMarketData>(raw);
-            return message is not null;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static IEnumerable<EpexMarketData> ParseEpexMessages(string raw) =>
-        TryParse(raw, out var message) ? [message] : [];
 }
