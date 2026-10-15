@@ -14,7 +14,7 @@ spec:
       targetPort: http
 ---
 # Headless Service so Envoy's STRICT_DNS cluster sees one address per ready pod and can health-check
-# them individually. Unready pods (startup replay, Kafka down, terminating) are omitted.
+# them individually. Unready pods (startup replay, faulted pipeline, terminating) are omitted.
 apiVersion: v1
 kind: Service
 metadata:

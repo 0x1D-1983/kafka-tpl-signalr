@@ -1,3 +1,4 @@
+using HealthChecks.UI.Client;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -12,6 +13,7 @@ public partial class Program
 {
     private static readonly string LiveTag = "live";
     private static readonly string ReadyTag = "ready";
+    private static readonly string KafkaTag = "kafka";
 
     public static WebApplication Create(string[] args)
     {
@@ -38,6 +40,7 @@ public partial class Program
         services.AddSingleton<EpexDataflowPipeline>();
         services.AddSingleton<ILastPriceCache, InMemoryLastPriceCache>();
         services.AddSingleton<KafkaCatchUpState>();
+        services.AddSingleton<KafkaConnectionState>();
         var kafkaEnabled = configuration.GetValue("Kafka:Enabled", true);
         if (kafkaEnabled)
         {
@@ -49,15 +52,16 @@ public partial class Program
         services.AddSignalR();
 
         // Liveness: process is up and the dataflow pipeline has not faulted (restart if it fails).
-        // Readiness: can serve traffic (pipeline, Kafka reachable, startup replay finished).
+        // Readiness: can serve traffic (pipeline, startup replay finished). Only conditions local to
+        // this pod: Kafka is shared, so gating on it would make every pod unready at once.
         var healthChecks = services.AddHealthChecks()
             .AddCheck("self", () => HealthCheckResult.Healthy(), tags: [ LiveTag ])
             .AddCheck<PipelineHealthCheck>("pipeline", tags: [ LiveTag, ReadyTag ]);
 
         if (kafkaEnabled)
         {
-            healthChecks.AddCheck<KafkaHealthCheck>("kafka", tags: [ ReadyTag ]);
             healthChecks.AddCheck<KafkaCatchUpHealthCheck>("kafka-catchup", tags: [ ReadyTag ]);
+            healthChecks.AddCheck<KafkaHealthCheck>("kafka", tags: [ KafkaTag ]);
         }
 
         services.AddProblemDetails();
@@ -112,11 +116,24 @@ public partial class Program
             ResponseWriter = HealthResponseWriter.WriteMinimal
         }).AllowAnonymous();
 
-        // Readiness: pod can receive traffic (pipeline, Kafka, replay done). LB stops sending if not ready.
+        // Readiness: pod can receive traffic (pipeline, replay done). LB stops sending if not ready.
         app.MapHealthChecks("/health/ready", new HealthCheckOptions
         {
             Predicate = reg => reg.Tags.Contains(ReadyTag),
             ResponseWriter = HealthResponseWriter.WriteMinimal
+        }).AllowAnonymous();
+
+        // Kafka connectivity for monitoring and alerting; no probe calls this. 503 while degraded.
+        app.MapHealthChecks("/health/kafka", new HealthCheckOptions
+        {
+            Predicate = reg => reg.Tags.Contains(KafkaTag),
+            ResponseWriter = UIResponseWriter.WriteHealthCheckUIResponse,
+            ResultStatusCodes =
+            {
+                [HealthStatus.Healthy] = StatusCodes.Status200OK,
+                [HealthStatus.Degraded] = StatusCodes.Status503ServiceUnavailable,
+                [HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable,
+            },
         }).AllowAnonymous();
 
         app.MapHub<PriceStreamHub>("/hubs/pricestream");

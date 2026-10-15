@@ -8,7 +8,7 @@ EPEX market data flows from Kafka through a TPL Dataflow pipeline and is exposed
 - **Parsing**: The Kafka value deserializer parses JSON straight from librdkafka's buffer (`ReadOnlySpan<byte>`, source-generated `JsonSerializerContext`), with no intermediate `byte[]` or `string`. Symbols are trimmed and upper-cased there; payloads that are not valid or have no symbol are skipped.
 - **TPL Dataflow**: bounded queue → per-symbol lanes that send to SignalR groups. Backpressure via bounded capacity.
 - **SignalR**: Hub `PriceStreamHub` at `/hubs/pricestream`. Methods: `Subscribe(symbols)`, `Unsubscribe(symbols)`, both returning `{ accepted, rejected: [{ symbol, reason }] }`. Clients receive `PriceUpdate` with EPEX payload.
-- **Health**: `/health/live` (liveness: process up, pipeline not faulted), `/health/ready` (readiness: Kafka reachable and startup replay finished). Use readiness for load balancer so traffic only goes to pods that can serve.
+- **Health**: `/health/live` (liveness: process up, pipeline not faulted), `/health/ready` (readiness: pipeline not faulted and startup replay finished), `/health/kafka` (diagnostic: broker connectivity as seen by the consumer, JSON, 503 while degraded). Use readiness for load balancer so traffic only goes to pods that can serve.
 - **Snapshot on subscribe**: Each tick is stored in memory as the last price for its symbol. `Subscribe` sends the cached price as a `PriceUpdate` for each newly added symbol, so a client does not wait for the next tick. An older source timestamp never replaces a newer one.
 - **Startup replay**: A new pod reads the last `ReplayWindowSeconds` of the topic into the cache without broadcasting, and stays unready until it reaches the offsets it had at startup. A client rerouted to it gets snapshots straight away.
 
@@ -75,7 +75,8 @@ JSON per message, matching `EpexMarketData`:
 Manifests under [`k8s/`](../k8s/) run three stateless replicas behind Envoy and a single-node Kafka broker. See the [root README](../README.md#kubernetes-kind--skaffold) for how to start the kind cluster.
 
 - **Liveness probe**: `GET /health/live` → 200 = process is up and the pipeline has not faulted. A failure restarts the container.
-- **Readiness probe**: `GET /health/ready` → 200 when Kafka is reachable and the startup replay is done. The Service and Envoy only send traffic to ready pods.
+- **Readiness probe**: `GET /health/ready` → 200 when the pipeline is healthy and the startup replay is done. The Service and Envoy only send traffic to ready pods.
+- **Kafka is not in readiness or liveness.** Kafka is shared, so an outage would make every pod unready at once, and Envoy (`healthy_panic_threshold: 0`) would refuse all new connections. Instead the pods stay ready and serve cached prices (each tick carries its timestamp). The consumer reconnects on its own. Alert on `GET /health/kafka` (503 with `disconnectedSince` and `lastError`), which no probe calls.
 - **Replicas**: 3, rolling update `maxUnavailable: 0` / `maxSurge: 1`, PodDisruptionBudget `minAvailable: 2`. A deploy brings a new pod up, and lets it catch up, before taking an old one down.
 - **Behind the edge**: TLS terminates at the edge, so the app does not redirect to HTTPS by default (`Https:Redirect=false`). `X-Forwarded-For` and `X-Forwarded-Proto` are honoured only from `ForwardedHeaders:KnownNetworks` / `KnownProxies` (the kind pod CIDR in the Deployment). If `Https:Redirect` is enabled, `/health/*` is still never redirected, so probes never see a 307.
 - **Every replica reads all partitions.** The broker auto-creates `epex-market-data` with 3 partitions; the count is independent of the replica count.

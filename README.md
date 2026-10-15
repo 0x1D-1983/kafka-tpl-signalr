@@ -6,7 +6,7 @@ EPEX market data pipeline: **Kafka → TPL Dataflow → SignalR**, with a React 
 
 | Path | Description |
 |------|-------------|
-| [**PriceStream/**](PriceStream/README.md) | ASP.NET Core backend: Kafka consumer, TPL Dataflow pipeline, SignalR hub at `/hubs/pricestream`. Health: `/health/live`, `/health/ready`. |
+| [**PriceStream/**](PriceStream/README.md) | ASP.NET Core backend: Kafka consumer, TPL Dataflow pipeline, SignalR hub at `/hubs/pricestream`. Health: `/health/live`, `/health/ready`, `/health/kafka` (diagnostic). |
 | [**PriceStreamClient/**](PriceStreamClient/README.md) | React (Vite) app that connects to the hub, subscribes to symbols, and shows price updates. Auto-resubscribes on reconnect. |
 | **docker-compose.yml** | Local Kafka (Zookeeper + broker) and Confluent Control Center for development. |
 | [**k8s/**](k8s/) | kind manifests: 3 PriceStream replicas, Envoy edge, Kafka. |

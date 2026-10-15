@@ -24,6 +24,7 @@ public sealed class KafkaEpexConsumerService : BackgroundService
     private readonly ILastPriceCache _lastPrices;
     private readonly SubscriptionPolicy _policy;
     private readonly KafkaCatchUpState _catchUp;
+    private readonly KafkaConnectionState _connection;
 
     public KafkaEpexConsumerService(
         ILogger<KafkaEpexConsumerService> logger,
@@ -31,7 +32,8 @@ public sealed class KafkaEpexConsumerService : BackgroundService
         EpexDataflowPipeline pipeline,
         ILastPriceCache lastPrices,
         SubscriptionPolicy policy,
-        KafkaCatchUpState catchUp)
+        KafkaCatchUpState catchUp,
+        KafkaConnectionState connection)
     {
         _logger = logger;
         _options = options.Value;
@@ -39,6 +41,7 @@ public sealed class KafkaEpexConsumerService : BackgroundService
         _lastPrices = lastPrices;
         _policy = policy;
         _catchUp = catchUp;
+        _connection = connection;
     }
 
     // Consume blocks the calling thread, so the loop runs off the host's startup path.
@@ -62,15 +65,25 @@ public sealed class KafkaEpexConsumerService : BackgroundService
             EnablePartitionEof = true
         };
 
-        using var consumer = new ConsumerBuilder<Ignore, EpexMarketData?>(config)
-            .SetValueDeserializer(new EpexMarketDataDeserializer())
-            .Build();
-        using var admin = new DependentAdminClientBuilder(consumer.Handle).Build();
-
         // Partition -> first offset that is live. Earlier offsets are replay.
         var liveFrom = new Dictionary<TopicPartition, long>();
         var pending = new HashSet<TopicPartition>();
         var nextRefresh = DateTime.MinValue;
+
+        // The error handler runs on this thread, inside Consume.
+        using var consumer = new ConsumerBuilder<Ignore, EpexMarketData?>(config)
+            .SetValueDeserializer(new EpexMarketDataDeserializer())
+            .SetErrorHandler((_, error) =>
+            {
+                _connection.RecordError(error);
+                _logger.LogWarning("Kafka error {Code}: {Reason}", error.Code, error.Reason);
+                // An idle topic delivers nothing that would show the brokers are back, so the
+                // metadata refresh doubles as a reconnect probe (retried every RetryDelay on failure).
+                if (!_connection.IsConnected)
+                    nextRefresh = DateTime.MinValue;
+            })
+            .Build();
+        using var admin = new DependentAdminClientBuilder(consumer.Handle).Build();
 
         try
         {
@@ -98,6 +111,9 @@ public sealed class KafkaEpexConsumerService : BackgroundService
                     _logger.LogWarning(ex, "Kafka consume error: {Reason}", ex.Error.Reason);
                     continue;
                 }
+
+                if (result is not null)
+                    _connection.RecordContact();
 
                 if (result is not null && !result.IsPartitionEOF
                     && liveFrom.TryGetValue(result.TopicPartition, out var live) && result.Offset.Value < live)
@@ -147,6 +163,8 @@ public sealed class KafkaEpexConsumerService : BackgroundService
         try
         {
             var metadata = admin.GetMetadata(_options.Topic, MetadataTimeout);
+            if (metadata.Brokers.Count > 0)
+                _connection.RecordContact();
             var topic = metadata.Topics.SingleOrDefault(t => t.Topic == _options.Topic);
             if (topic is null || topic.Error.IsError || topic.Partitions.Count == 0)
             {
@@ -257,7 +275,7 @@ public sealed class KafkaOptions
 {
     public const string SectionName = "Kafka";
 
-    /// <summary>When false, this process does not consume Kafka and Kafka is omitted from readiness.</summary>
+    /// <summary>When false, this process does not consume Kafka and the catch-up gate is omitted from readiness.</summary>
     public bool Enabled { get; set; } = true;
 
     public string BootstrapServers { get; set; } = "localhost:9092";

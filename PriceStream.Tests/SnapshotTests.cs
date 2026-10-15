@@ -98,6 +98,31 @@ public sealed class SnapshotTests
         Assert.Equal(43m, (await client.NextAsync(TimeSpan.FromSeconds(20))).Price);
     }
 
+    [Fact(Timeout = 240_000)]
+    public async Task Kafka_outage_is_reported_but_the_pod_stays_ready()
+    {
+        var kafka = new KafkaBuilder("confluentinc/cp-kafka:7.5.0").Build();
+        await using var kafkaLifetime = kafka;
+        await kafka.StartAsync();
+        var bootstrap = kafka.GetBootstrapAddress();
+        var topic = $"epex-{Guid.NewGuid():N}";
+        using (var admin = new AdminClientBuilder(new AdminClientConfig { BootstrapServers = bootstrap }).Build())
+            await admin.CreateTopicsAsync([new TopicSpecification { Name = topic, NumPartitions = 1, ReplicationFactor = 1 }]);
+
+        await using var pod = await Pod.StartAsync(
+            "--Kafka:Enabled=true",
+            $"--Kafka:BootstrapServers={bootstrap}",
+            $"--Kafka:Topic={topic}");
+        await pod.WaitUntilReadyAsync(TimeSpan.FromSeconds(60));
+        await pod.WaitForStatusAsync("/health/kafka", HttpStatusCode.OK, TimeSpan.FromSeconds(30));
+
+        await kafka.StopAsync();
+
+        await pod.WaitForStatusAsync("/health/kafka", HttpStatusCode.ServiceUnavailable, TimeSpan.FromSeconds(60));
+        Assert.Equal(HttpStatusCode.OK, await pod.StatusAsync("/health/ready"));
+        Assert.Equal(HttpStatusCode.OK, await pod.StatusAsync("/health/live"));
+    }
+
     private static Task Produce(IProducer<Null, string> producer, string topic, int partition, EpexMarketData price, DateTimeOffset kafkaTime) =>
         producer.ProduceAsync(
             new TopicPartition(topic, partition),
@@ -178,6 +203,26 @@ public sealed class SnapshotTests
             }
 
             throw new TimeoutException("Pod did not become ready.");
+        }
+
+        public async Task<HttpStatusCode> StatusAsync(string path)
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+            using var response = await http.GetAsync($"{Url}{path}");
+            return response.StatusCode;
+        }
+
+        public async Task WaitForStatusAsync(string path, HttpStatusCode expected, TimeSpan timeout)
+        {
+            var deadline = DateTime.UtcNow + timeout;
+            while (DateTime.UtcNow < deadline)
+            {
+                if (await StatusAsync(path) == expected)
+                    return;
+                await Task.Delay(200);
+            }
+
+            throw new TimeoutException($"{path} did not return {expected}.");
         }
 
         public async ValueTask DisposeAsync()
