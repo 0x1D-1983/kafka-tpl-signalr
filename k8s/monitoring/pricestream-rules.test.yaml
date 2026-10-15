@@ -1,0 +1,67 @@
+# promtool test rules k8s/monitoring/pricestream-rules.test.yaml
+# A fresh pod's last_message_time keeps pace with time(), which starts at 0 in promtool.
+rule_files:
+  - pricestream-rules.yaml
+
+evaluation_interval: 15s
+
+tests:
+  - name: one pod stops receiving while the others keep going
+    interval: 15s
+    input_series:
+      - series: 'pricestream_kafka_last_message_time_seconds{pod="pricestream-a"}'
+        values: '0+15x40'
+      - series: 'pricestream_kafka_last_message_time_seconds{pod="pricestream-b"}'
+        values: '0+15x40'
+      # Last message at 2m.
+      - series: 'pricestream_kafka_last_message_time_seconds{pod="pricestream-c"}'
+        values: '0+15x8 120x32'
+    alert_rule_test:
+      # Stale for more than 60s, but not yet for 2m.
+      - eval_time: 4m
+        alertname: PriceStreamPodDataStale
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: PriceStreamPodDataStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: pricestream-c
+            exp_annotations:
+              summary: "pricestream-c has received no Kafka data for 4m 0s while other pods have"
+              description: >-
+                The pod stays ready and serves cached prices, so its clients see stale data.
+                Check GET /health/kafka on the pod for lastError; delete the pod if it does not recover.
+
+  - name: every pod is stale (quiet topic or Kafka outage)
+    interval: 15s
+    input_series:
+      - series: 'pricestream_kafka_last_message_time_seconds{pod="pricestream-a"}'
+        values: '0+15x8 120x32'
+      - series: 'pricestream_kafka_last_message_time_seconds{pod="pricestream-b"}'
+        values: '0+15x8 120x32'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PriceStreamPodDataStale
+        exp_alerts: []
+
+  - name: a pod that never received anything is stale too
+    interval: 15s
+    input_series:
+      - series: 'pricestream_kafka_last_message_time_seconds{pod="pricestream-a"}'
+        values: '0+15x40'
+      - series: 'pricestream_kafka_last_message_time_seconds{pod="pricestream-b"}'
+        values: '0x40'
+    # The gauge is 0 until the first message; promtool's clock also starts at 0, so "stale" starts at 1m here.
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PriceStreamPodDataStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: pricestream-b
+            exp_annotations:
+              summary: "pricestream-b has received no Kafka data for 4m 0s while other pods have"
+              description: >-
+                The pod stays ready and serves cached prices, so its clients see stale data.
+                Check GET /health/kafka on the pod for lastError; delete the pod if it does not recover.

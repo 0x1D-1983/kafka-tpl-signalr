@@ -89,6 +89,12 @@ public sealed class SnapshotTests
         await pod.WaitUntilCachedAsync("FR", 42m);
         Assert.Empty(await pod.CachedAsync("AT"));
 
+        // Prometheus compares this across pods to find one that stopped receiving data.
+        var lastMessage = await pod.MetricAsync("pricestream_kafka_last_message_time_seconds");
+        Assert.InRange(lastMessage, DateTimeOffset.UtcNow.AddMinutes(-1).ToUnixTimeSeconds(), DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 1);
+        Assert.Equal(1, await pod.MetricAsync("pricestream_kafka_connected"));
+        Assert.Equal(2, await pod.MetricAsync("pricestream_kafka_messages_total"));
+
         await using var client = await SnapshotClient.ConnectAsync(pod.Url);
         await client.SubscribeAsync("DE");
         Assert.Equal(41m, (await client.NextAsync(TimeSpan.FromSeconds(5))).Price);
@@ -210,6 +216,15 @@ public sealed class SnapshotTests
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
             using var response = await http.GetAsync($"{Url}{path}");
             return response.StatusCode;
+        }
+
+        public async Task<double> MetricAsync(string name)
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+            var text = await http.GetStringAsync($"{Url}/metrics");
+            var line = text.Split('\n').FirstOrDefault(l => l.StartsWith(name + " ") || l.StartsWith(name + "{"))
+                ?? throw new InvalidOperationException($"{name} not in /metrics:\n{text}");
+            return double.Parse(line[(line.LastIndexOf(' ') + 1)..], System.Globalization.CultureInfo.InvariantCulture);
         }
 
         public async Task WaitForStatusAsync(string path, HttpStatusCode expected, TimeSpan timeout)

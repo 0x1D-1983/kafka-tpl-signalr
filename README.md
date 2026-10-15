@@ -63,8 +63,11 @@ Everything runs in the `pricestream` namespace. The public entry point is the ed
 ```bash
 curl -si -X POST "localhost:8080/hubs/pricestream/negotiate?negotiateVersion=1"
 curl -si localhost:8080/health/ready                 # 404 from Envoy: not routed
-kubectl port-forward svc/pricestream 8081:80         # skaffold dev does this; /health/* is here
+kubectl port-forward svc/pricestream 8081:80         # skaffold dev does this; /health/* and /metrics are here
+kubectl port-forward svc/prometheus 9090:9090        # skaffold dev does this too; alerts on /alerts
 ```
+
+A single Prometheus (`k8s/monitoring/`) scrapes every PriceStream pod and evaluates `PriceStreamPodDataStale`, which fires when one pod stops receiving Kafka data while the others keep going. There is no Alertmanager in kind; firing alerts are listed on <http://localhost:9090/alerts>.
 
 The `epex-mock` deployment publishes a DE and an FR price every second (JSON shape in `PriceStream/sample-epex-messages.json`). To publish one message by hand:
 

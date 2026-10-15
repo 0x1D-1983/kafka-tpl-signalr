@@ -1,0 +1,23 @@
+groups:
+  - name: pricestream
+    rules:
+      # Seconds since each pod last received a Kafka message. Every pod reads the whole topic.
+      - record: pricestream:kafka_data_age_seconds
+        expr: time() - pricestream_kafka_last_message_time_seconds
+
+      # One pod stopped receiving while another still does, so Kafka and the producer are fine and
+      # the fault is local to that pod. If every pod is stale (quiet topic, Kafka outage) this stays
+      # silent; that is a different alert.
+      - alert: PriceStreamPodDataStale
+        expr: |
+          pricestream:kafka_data_age_seconds > 60
+          and on ()
+          count(pricestream:kafka_data_age_seconds < 30) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.pod }} has received no Kafka data for {{ $value | humanizeDuration }} while other pods have"
+          description: >-
+            The pod stays ready and serves cached prices, so its clients see stale data.
+            Check GET /health/kafka on the pod for lastError; delete the pod if it does not recover.

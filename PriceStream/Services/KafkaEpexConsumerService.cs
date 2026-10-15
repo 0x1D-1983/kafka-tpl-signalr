@@ -25,6 +25,7 @@ public sealed class KafkaEpexConsumerService : BackgroundService
     private readonly SubscriptionPolicy _policy;
     private readonly KafkaCatchUpState _catchUp;
     private readonly KafkaConnectionState _connection;
+    private readonly KafkaMetrics _metrics;
 
     public KafkaEpexConsumerService(
         ILogger<KafkaEpexConsumerService> logger,
@@ -33,7 +34,8 @@ public sealed class KafkaEpexConsumerService : BackgroundService
         ILastPriceCache lastPrices,
         SubscriptionPolicy policy,
         KafkaCatchUpState catchUp,
-        KafkaConnectionState connection)
+        KafkaConnectionState connection,
+        KafkaMetrics metrics)
     {
         _logger = logger;
         _options = options.Value;
@@ -42,6 +44,7 @@ public sealed class KafkaEpexConsumerService : BackgroundService
         _policy = policy;
         _catchUp = catchUp;
         _connection = connection;
+        _metrics = metrics;
     }
 
     // Consume blocks the calling thread, so the loop runs off the host's startup path.
@@ -114,6 +117,8 @@ public sealed class KafkaEpexConsumerService : BackgroundService
 
                 if (result is not null)
                     _connection.RecordContact();
+                if (result is { IsPartitionEOF: false })
+                    _metrics.MessageReceived();
 
                 if (result is not null && !result.IsPartitionEOF
                     && liveFrom.TryGetValue(result.TopicPartition, out var live) && result.Offset.Value < live)

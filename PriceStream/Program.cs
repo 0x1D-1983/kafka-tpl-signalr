@@ -2,6 +2,7 @@ using HealthChecks.UI.Client;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using OpenTelemetry.Metrics;
 using PriceStream.Health;
 using PriceStream.Hubs;
 using PriceStream.Services;
@@ -44,12 +45,18 @@ public partial class Program
         var kafkaEnabled = configuration.GetValue("Kafka:Enabled", true);
         if (kafkaEnabled)
         {
+            services.AddSingleton<KafkaMetrics>();
             services.AddHostedService<KafkaEpexConsumerService>();
         }
         services.AddSingleton<SignalRPriceBroadcaster>();
         services.AddHostedService(sp => sp.GetRequiredService<SignalRPriceBroadcaster>());
 
         services.AddSignalR();
+
+        // Scraped by Prometheus on /metrics; the edge does not route it.
+        services.AddOpenTelemetry().WithMetrics(metrics => metrics
+            .AddMeter(KafkaMetrics.MeterName, "Microsoft.AspNetCore.Hosting", "Microsoft.AspNetCore.Http.Connections")
+            .AddPrometheusExporter());
 
         // Liveness: process is up and the dataflow pipeline has not faulted (restart if it fails).
         // Readiness: can serve traffic (pipeline, startup replay finished). Only conditions local to
@@ -100,9 +107,10 @@ public partial class Program
 
         if (httpsRedirect)
         {
-            // Kubelet probes call the pod IP over plain HTTP and must never see a 307.
+            // Kubelet probes and Prometheus call the pod IP over plain HTTP and must never see a 307.
             app.UseWhen(
-                context => !context.Request.Path.StartsWithSegments("/health"),
+                context => !context.Request.Path.StartsWithSegments("/health")
+                    && !context.Request.Path.StartsWithSegments("/metrics"),
                 branch => branch.UseHttpsRedirection());
         }
 
@@ -135,6 +143,8 @@ public partial class Program
                 [HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable,
             },
         }).AllowAnonymous();
+
+        app.MapPrometheusScrapingEndpoint();
 
         app.MapHub<PriceStreamHub>("/hubs/pricestream");
 

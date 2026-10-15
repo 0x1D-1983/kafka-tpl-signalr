@@ -47,7 +47,8 @@ public sealed class HttpsRedirectTests
     [Theory]
     [InlineData("/health/live")]
     [InlineData("/health/ready")]
-    public async Task Probes_are_never_redirected(string path)
+    [InlineData("/metrics")]
+    public async Task Probes_and_scrapes_are_never_redirected(string path)
     {
         await using var app = await StartAsync("--Https:Redirect=true");
         using var http = Client();

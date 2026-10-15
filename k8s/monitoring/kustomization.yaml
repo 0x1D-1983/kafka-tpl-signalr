@@ -1,0 +1,14 @@
+# ConfigMap names get a content hash, so editing the config or rules rolls the Prometheus pod.
+# Rule tests: promtool test rules pricestream-rules.test.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: pricestream
+resources:
+  - prometheus.yaml
+configMapGenerator:
+  - name: prometheus-config
+    files:
+      - prometheus.yml
+  - name: prometheus-rules
+    files:
+      - pricestream-rules.yaml

@@ -135,7 +135,7 @@ spec:
     matchLabels:
       app: pricestream
 ---
-# Only the edge Envoy may connect to the hubs. Kubelet probes and kubectl port-forward come from the node, not a pod.
+# Only the edge Envoy (hubs) and Prometheus (/metrics) may connect. Kubelet probes and kubectl port-forward come from the node, not a pod.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -150,5 +150,9 @@ spec:
         - podSelector:
             matchLabels:
               app: edge-envoy
+        # Scrapes /metrics.
+        - podSelector:
+            matchLabels:
+              app: prometheus
       ports:
         - port: http
