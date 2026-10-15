@@ -59,13 +59,13 @@ public partial class Program
             healthChecks.AddCheck<KafkaCatchUpHealthCheck>("kafka-catchup", tags: [ ReadyTag ]);
         }
 
-        services.AddRazorPages();
+        services.AddProblemDetails();
 
         var app = builder.Build();
 
         if (!app.Environment.IsDevelopment())
         {
-            app.UseExceptionHandler("/Error");
+            app.UseExceptionHandler();
             app.UseHsts();
         }
 
