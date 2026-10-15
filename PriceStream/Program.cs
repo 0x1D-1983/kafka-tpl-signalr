@@ -42,10 +42,10 @@ public partial class Program
         services.AddSingleton<ILastPriceCache, InMemoryLastPriceCache>();
         services.AddSingleton<KafkaCatchUpState>();
         services.AddSingleton<KafkaConnectionState>();
+        services.AddSingleton<PriceStreamMetrics>();
         var kafkaEnabled = configuration.GetValue("Kafka:Enabled", true);
         if (kafkaEnabled)
         {
-            services.AddSingleton<KafkaMetrics>();
             services.AddHostedService<KafkaEpexConsumerService>();
         }
         services.AddSingleton<SignalRPriceBroadcaster>();
@@ -55,8 +55,8 @@ public partial class Program
 
         // Scraped by Prometheus on /metrics; the edge does not route it.
         services.AddOpenTelemetry().WithMetrics(metrics => metrics
-            .AddMeter(KafkaMetrics.MeterName, "Microsoft.AspNetCore.Hosting", "Microsoft.AspNetCore.Http.Connections")
-            .AddPrometheusExporter());
+            .AddMeter(PriceStreamMetrics.MeterName, "Microsoft.AspNetCore.Hosting", "Microsoft.AspNetCore.Http.Connections")
+            .AddPrometheusExporter(options => options.ScrapeResponseCacheDurationMilliseconds = 0));
 
         // Liveness: process is up and the dataflow pipeline has not faulted (restart if it fails).
         // Readiness: can serve traffic (pipeline, startup replay finished). Only conditions local to

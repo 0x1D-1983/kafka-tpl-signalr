@@ -32,3 +32,9 @@ portForward:
     namespace: pricestream
     port: 9090
     localPort: 9090
+  # Grafana; the PriceStream dashboard is the home page.
+  - resourceType: service
+    resourceName: grafana
+    namespace: pricestream
+    port: 3000
+    localPort: 3000

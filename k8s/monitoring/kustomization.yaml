@@ -1,10 +1,11 @@
-# ConfigMap names get a content hash, so editing the config or rules rolls the Prometheus pod.
+# ConfigMap names get a content hash, so editing the config, rules or dashboard rolls the pod.
 # Rule tests: promtool test rules pricestream-rules.test.yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: pricestream
 resources:
   - prometheus.yaml
+  - grafana.yaml
 configMapGenerator:
   - name: prometheus-config
     files:
@@ -12,3 +13,12 @@ configMapGenerator:
   - name: prometheus-rules
     files:
       - pricestream-rules.yaml
+  - name: grafana-datasources
+    files:
+      - grafana-datasources.yaml
+  - name: grafana-dashboard-providers
+    files:
+      - grafana-dashboards.yaml
+  - name: grafana-dashboards
+    files:
+      - dashboards/pricestream.json

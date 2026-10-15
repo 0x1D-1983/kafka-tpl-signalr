@@ -1,7 +1,6 @@
 using System.Threading.Tasks.Dataflow;
 using Microsoft.AspNetCore.SignalR;
 using PriceStream.Hubs;
-using PriceStream.Models;
 
 namespace PriceStream.Services;
 
@@ -28,9 +27,10 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
     private readonly EpexDataflowPipeline _pipeline;
     private readonly ILastPriceCache _lastPrices;
     private readonly SubscriptionPolicy _policy;
+    private readonly PriceStreamMetrics _metrics;
     private readonly ILogger<SignalRPriceBroadcaster> _logger;
-    private readonly ActionBlock<EpexMarketData> _targetBlock;
-    private readonly ActionBlock<EpexMarketData>[] _lanes;
+    private readonly ActionBlock<PriceTick> _targetBlock;
+    private readonly ActionBlock<PriceTick>[] _lanes;
     private readonly TaskCompletionSource _faulted = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly IDisposable _link;
 
@@ -39,17 +39,19 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
         EpexDataflowPipeline pipeline,
         ILastPriceCache lastPrices,
         SubscriptionPolicy policy,
+        PriceStreamMetrics metrics,
         ILogger<SignalRPriceBroadcaster> logger)
     {
         _hubContext = hubContext;
         _pipeline = pipeline;
         _lastPrices = lastPrices;
         _policy = policy;
+        _metrics = metrics;
         _logger = logger;
-        _lanes = new ActionBlock<EpexMarketData>[LaneCount];
+        _lanes = new ActionBlock<PriceTick>[LaneCount];
         for (var i = 0; i < _lanes.Length; i++)
         {
-            _lanes[i] = new ActionBlock<EpexMarketData>(
+            var lane = new ActionBlock<PriceTick>(
                 OnMessageAsync,
                 new ExecutionDataflowBlockOptions
                 {
@@ -57,11 +59,13 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
                     BoundedCapacity = 500,
                     EnsureOrdered = true
                 });
-            WatchFault(_lanes[i].Completion);
+            _lanes[i] = lane;
+            WatchFault(lane.Completion);
+            metrics.ObserveQueue($"lane-{i}", () => lane.InputCount);
         }
 
         // Single reader into the lanes, so two ticks for one symbol are queued in arrival order.
-        _targetBlock = new ActionBlock<EpexMarketData>(
+        _targetBlock = new ActionBlock<PriceTick>(
             RouteAsync,
             new ExecutionDataflowBlockOptions
             {
@@ -70,12 +74,14 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
                 EnsureOrdered = true
             });
         _targetBlock.Completion.ContinueWith(
-            static (completed, state) => CompleteLanes((ActionBlock<EpexMarketData>[])state!, completed),
+            static (completed, state) => CompleteLanes((ActionBlock<PriceTick>[])state!, completed),
             _lanes,
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
         WatchFault(_targetBlock.Completion);
+        metrics.ObserveQueue("queue", () => _pipeline.Count);
+        metrics.ObserveQueue("router", () => _targetBlock.InputCount);
         // Linked up front so shutdown can propagate completion into this block even if ExecuteAsync has not started.
         _link = _pipeline.LinkTo(_targetBlock);
     }
@@ -143,7 +149,7 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
 
-    private static void CompleteLanes(ActionBlock<EpexMarketData>[] lanes, Task routerCompletion)
+    private static void CompleteLanes(ActionBlock<PriceTick>[] lanes, Task routerCompletion)
     {
         var error = routerCompletion.IsFaulted ? routerCompletion.Exception?.GetBaseException() : null;
         foreach (var lane in lanes)
@@ -168,19 +174,20 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
         return (hash & int.MaxValue) % LaneCount;
     }
 
-    private Task RouteAsync(EpexMarketData message)
+    private Task RouteAsync(PriceTick tick)
     {
         try
         {
             // The parser rejects messages without a symbol. This guards code that posts objects
             // directly: a throw here would fault the router and stop broadcasting.
-            if (string.IsNullOrEmpty(message.Symbol))
+            if (string.IsNullOrEmpty(tick.Data.Symbol))
             {
                 _logger.LogWarning("Dropping price update with no symbol");
+                _metrics.MessageDropped(DropReason.NoSymbol);
                 return Task.CompletedTask;
             }
 
-            return _lanes[LaneIndex(message.Symbol)].SendAsync(message);
+            return _lanes[LaneIndex(tick.Data.Symbol)].SendAsync(tick);
         }
         catch (Exception ex)
         {
@@ -189,13 +196,14 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
         }
     }
 
-    private async Task OnMessageAsync(EpexMarketData message)
+    private async Task OnMessageAsync(PriceTick tick)
     {
         string? group = null;
         try
         {
             // Nothing may escape this delegate: a thrown ActionBlock stays faulted and stops broadcasting.
             // Symbol is already trimmed and upper-case (EpexMessageParser) and non-empty (RouteAsync).
+            var message = tick.Data;
             var symbol = message.Symbol;
             group = PriceStreamHub.SymbolGroup(symbol);
 
@@ -213,10 +221,13 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
             }
 
             await _hubContext.Clients.Group(group).PriceUpdate(message);
+            if (tick.KafkaTimestamp is { } kafkaTimestamp)
+                _metrics.Published(kafkaTimestamp);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to broadcast to group {Group}", group);
+            _metrics.MessageDropped(DropReason.SendFailed);
         }
     }
 }

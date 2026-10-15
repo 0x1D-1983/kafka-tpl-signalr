@@ -21,7 +21,7 @@ public sealed class PipelineFailureTests
     public async Task Complete_drains_linked_targets()
     {
         var pipeline = new EpexDataflowPipeline();
-        var target = new ActionBlock<EpexMarketData>(_ => { });
+        var target = new ActionBlock<PriceTick>(_ => { });
         using var link = pipeline.LinkTo(target);
 
         Assert.True(pipeline.Post(Sample("DE", 10m)));
@@ -40,10 +40,10 @@ public sealed class PipelineFailureTests
         var processingFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var received = new List<string>();
-        var target = new ActionBlock<EpexMarketData>(async message =>
+        var target = new ActionBlock<PriceTick>(async tick =>
         {
-            lock (received) received.Add(message.Symbol);
-            if (message.Symbol == "DE")
+            lock (received) received.Add(tick.Data.Symbol);
+            if (tick.Data.Symbol == "DE")
             {
                 processingFirst.TrySetResult();
                 await release.Task;
@@ -72,9 +72,9 @@ public sealed class PipelineFailureTests
             Assert.True(pipeline.Post(Sample(symbol, 1)));
 
         var received = new List<string>();
-        var target = new ActionBlock<EpexMarketData>(message =>
+        var target = new ActionBlock<PriceTick>(tick =>
         {
-            lock (received) received.Add(message.Symbol);
+            lock (received) received.Add(tick.Data.Symbol);
         });
         using var link = pipeline.LinkTo(target);
         pipeline.Complete();
@@ -190,6 +190,9 @@ public sealed class PipelineFailureTests
             pipeline,
             new InMemoryLastPriceCache(),
             new SubscriptionPolicy(Microsoft.Extensions.Options.Options.Create(new SubscriptionOptions())),
+            new PriceStreamMetrics(
+                new ServiceCollection().AddMetrics().BuildServiceProvider().GetRequiredService<System.Diagnostics.Metrics.IMeterFactory>(),
+                new KafkaConnectionState()),
             NullLogger<SignalRPriceBroadcaster>.Instance);
 
         var symbols = new[] { "DE", "FR", "AT", "NL", "CH", "BE", "DK", "NO" };

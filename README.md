@@ -65,9 +65,10 @@ curl -si -X POST "localhost:8080/hubs/pricestream/negotiate?negotiateVersion=1"
 curl -si localhost:8080/health/ready                 # 404 from Envoy: not routed
 kubectl port-forward svc/pricestream 8081:80         # skaffold dev does this; /health/* and /metrics are here
 kubectl port-forward svc/prometheus 9090:9090        # skaffold dev does this too; alerts on /alerts
+kubectl port-forward svc/grafana 3000:3000           # skaffold dev does this too; dashboard is the home page
 ```
 
-A single Prometheus (`k8s/monitoring/`) scrapes every PriceStream pod and evaluates `PriceStreamPodDataStale`, which fires when one pod stops receiving Kafka data while the others keep going. There is no Alertmanager in kind; firing alerts are listed on <http://localhost:9090/alerts>.
+A single Prometheus (`k8s/monitoring/`) scrapes every PriceStream pod and evaluates `PriceStreamPodDataStale`, which fires when one pod stops receiving Kafka data while the others keep going. There is no Alertmanager in kind; firing alerts are listed on <http://localhost:9090/alerts>. Grafana on <http://localhost:3000> (anonymous view; `admin`/`admin` to edit) shows the PriceStream dashboard: messages consumed, parsed, failed and dropped, pipeline queue depth, publish latency, connections, subscriptions per symbol, consumer lag and data age.
 
 The `epex-mock` deployment publishes a DE and an FR price every second (JSON shape in `PriceStream/sample-epex-messages.json`). To publish one message by hand:
 

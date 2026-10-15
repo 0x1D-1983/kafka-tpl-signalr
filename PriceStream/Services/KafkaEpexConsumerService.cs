@@ -17,6 +17,7 @@ public sealed class KafkaEpexConsumerService : BackgroundService
 {
     private static readonly TimeSpan MetadataTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan LagUpdateInterval = TimeSpan.FromSeconds(5);
 
     private readonly ILogger<KafkaEpexConsumerService> _logger;
     private readonly KafkaOptions _options;
@@ -25,7 +26,7 @@ public sealed class KafkaEpexConsumerService : BackgroundService
     private readonly SubscriptionPolicy _policy;
     private readonly KafkaCatchUpState _catchUp;
     private readonly KafkaConnectionState _connection;
-    private readonly KafkaMetrics _metrics;
+    private readonly PriceStreamMetrics _metrics;
 
     public KafkaEpexConsumerService(
         ILogger<KafkaEpexConsumerService> logger,
@@ -35,7 +36,7 @@ public sealed class KafkaEpexConsumerService : BackgroundService
         SubscriptionPolicy policy,
         KafkaCatchUpState catchUp,
         KafkaConnectionState connection,
-        KafkaMetrics metrics)
+        PriceStreamMetrics metrics)
     {
         _logger = logger;
         _options = options.Value;
@@ -72,6 +73,7 @@ public sealed class KafkaEpexConsumerService : BackgroundService
         var liveFrom = new Dictionary<TopicPartition, long>();
         var pending = new HashSet<TopicPartition>();
         var nextRefresh = DateTime.MinValue;
+        var nextLagUpdate = DateTime.MinValue;
 
         // The error handler runs on this thread, inside Consume.
         using var consumer = new ConsumerBuilder<Ignore, EpexMarketData?>(config)
@@ -118,7 +120,13 @@ public sealed class KafkaEpexConsumerService : BackgroundService
                 if (result is not null)
                     _connection.RecordContact();
                 if (result is { IsPartitionEOF: false })
-                    _metrics.MessageReceived();
+                    _metrics.MessageReceived(parsed: result.Message.Value is not null);
+
+                if (DateTime.UtcNow >= nextLagUpdate)
+                {
+                    UpdateConsumerLag(consumer, liveFrom.Keys);
+                    nextLagUpdate = DateTime.UtcNow + LagUpdateInterval;
+                }
 
                 if (result is not null && !result.IsPartitionEOF
                     && liveFrom.TryGetValue(result.TopicPartition, out var live) && result.Offset.Value < live)
@@ -141,9 +149,16 @@ public sealed class KafkaEpexConsumerService : BackgroundService
                 if (result.Message.Value is not { } message)
                     continue;
 
-                var accepted = _pipeline.Post(message);
+                var timestamp = result.Message.Timestamp;
+                var kafkaTimestamp = timestamp.Type == TimestampType.NotAvailable
+                    ? (DateTimeOffset?)null
+                    : DateTimeOffset.FromUnixTimeMilliseconds(timestamp.UnixTimestampMs);
+                var accepted = _pipeline.Post(message, kafkaTimestamp);
                 if (!accepted)
+                {
+                    _metrics.MessageDropped(DropReason.Backpressure);
                     _logger.LogWarning("Pipeline backpressure: message dropped for offset {Offset}", result.Offset.Value);
+                }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -238,6 +253,19 @@ public sealed class KafkaEpexConsumerService : BackgroundService
                 pending.Add(tpo.TopicPartition);
             return new TopicPartitionOffset(tpo.TopicPartition, offset);
         }).ToList();
+    }
+
+    // Both values are local: the watermark comes from the last fetch response, so no broker round trip.
+    private void UpdateConsumerLag(IConsumer<Ignore, EpexMarketData?> consumer, IEnumerable<TopicPartition> partitions)
+    {
+        foreach (var tp in partitions)
+        {
+            var high = consumer.GetWatermarkOffsets(tp).High;
+            var position = consumer.Position(tp);
+            if (high.IsSpecial || position.IsSpecial)
+                continue;
+            _metrics.SetConsumerLag(tp.Topic, tp.Partition.Value, Math.Max(0, high.Value - position.Value));
+        }
     }
 
     private async Task ReplayAsync(EpexMarketData? message)

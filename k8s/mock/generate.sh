@@ -34,4 +34,6 @@ produce() {
   done
 }
 
-produce | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$bootstrap" --topic "$topic"
+# --timeout is linger.ms (default 1000). The record timestamp is taken before lingering, so the
+# default would add up to a second to PriceStream's publish latency.
+produce | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$bootstrap" --topic "$topic" --timeout 5

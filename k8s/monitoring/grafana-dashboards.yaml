@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: pricestream
+    folder: PriceStream
+    type: file
+    # The ConfigMap is the source of truth; edits in the UI are lost on restart.
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

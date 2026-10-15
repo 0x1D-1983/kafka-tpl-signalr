@@ -10,12 +10,18 @@ public sealed class PriceStreamHub : Hub<IPriceClient>
     private readonly ILogger<PriceStreamHub> _logger;
     private readonly SubscriptionPolicy _policy;
     private readonly ILastPriceCache _lastPrices;
+    private readonly PriceStreamMetrics _metrics;
 
-    public PriceStreamHub(ILogger<PriceStreamHub> logger, SubscriptionPolicy policy, ILastPriceCache lastPrices)
+    public PriceStreamHub(
+        ILogger<PriceStreamHub> logger,
+        SubscriptionPolicy policy,
+        ILastPriceCache lastPrices,
+        PriceStreamMetrics metrics)
     {
         _logger = logger;
         _policy = policy;
         _lastPrices = lastPrices;
+        _metrics = metrics;
     }
 
     /// <summary>
@@ -75,6 +81,9 @@ public sealed class PriceStreamHub : Hub<IPriceClient>
             throw;
         }
 
+        foreach (var symbol in added)
+            _metrics.SubscriptionAdded(symbol);
+
         // Read after joining the groups so no tick falls between snapshot and stream. A live tick can
         // still reach the client before an older snapshot; clients drop ticks older than the latest seen.
         await SendSnapshotAsync(added);
@@ -118,6 +127,7 @@ public sealed class PriceStreamHub : Hub<IPriceClient>
             }
 
             removed.Add(symbol);
+            _metrics.SubscriptionRemoved(symbol);
         }
 
         await Task.WhenAll(removed.Select(symbol =>
@@ -135,6 +145,9 @@ public sealed class PriceStreamHub : Hub<IPriceClient>
     public override Task OnDisconnectedAsync(Exception? exception)
     {
         _logger.LogInformation("Client disconnected: {ConnectionId}, Reason: {Reason}", Context.ConnectionId, exception?.Message ?? "normal");
+        // SignalR removes the connection from its groups; only the gauge needs updating.
+        foreach (var symbol in Subscriptions())
+            _metrics.SubscriptionRemoved(symbol);
         return Task.CompletedTask;
     }
 

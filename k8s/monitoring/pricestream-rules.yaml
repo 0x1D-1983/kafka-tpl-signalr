@@ -1,18 +1,17 @@
 groups:
   - name: pricestream
     rules:
-      # Seconds since each pod last received a Kafka message. Every pod reads the whole topic.
-      - record: pricestream:kafka_data_age_seconds
-        expr: time() - pricestream_kafka_last_message_time_seconds
-
       # One pod stopped receiving while another still does, so Kafka and the producer are fine and
       # the fault is local to that pod. If every pod is stale (quiet topic, Kafka outage) this stays
       # silent; that is a different alert.
+      # Computed from the scraped series rather than a recording rule: scraped series go stale as
+      # soon as a pod is gone, while a recorded age lingers for the lookback window and a replaced
+      # pod's last value could keep the alert pending through a rollout.
       - alert: PriceStreamPodDataStale
         expr: |
-          pricestream:kafka_data_age_seconds > 60
+          (time() - pricestream_kafka_last_message_time_seconds) > 60
           and on ()
-          count(pricestream:kafka_data_age_seconds < 30) > 0
+          count((time() - pricestream_kafka_last_message_time_seconds) < 30) > 0
         for: 2m
         labels:
           severity: warning

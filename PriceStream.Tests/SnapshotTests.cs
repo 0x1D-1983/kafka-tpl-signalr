@@ -57,6 +57,10 @@ public sealed class SnapshotTests
 
         await client.SubscribeAsync("DE");
         await client.ExpectNothingAsync(TimeSpan.FromMilliseconds(300));
+        Assert.Equal(1, await pod.MetricAsync("pricestream_subscriptions", "symbol=\"DE\""));
+
+        await client.DisposeAsync();
+        await pod.WaitUntilMetricGoneAsync("pricestream_subscriptions", "symbol=\"DE\"", TimeSpan.FromSeconds(10));
     }
 
     [Fact(Timeout = 240_000)]
@@ -77,6 +81,9 @@ public sealed class SnapshotTests
         await Produce(producer, topic, 0, Price("AT", 9m, "2026-10-13T08:00:00Z"), now.AddHours(-2));
         await Produce(producer, topic, 0, Price("DE", 41m, "2026-10-13T12:00:00Z"), now.AddMinutes(-1));
         await Produce(producer, topic, 1, Price("FR", 42m, "2026-10-13T12:00:00Z"), now.AddMinutes(-1));
+        await producer.ProduceAsync(
+            new TopicPartition(topic, 1),
+            new Message<Null, string> { Value = "not json", Timestamp = new Timestamp(now.AddMinutes(-1)) });
 
         await using var pod = await Pod.StartAsync(
             "--Kafka:Enabled=true",
@@ -93,15 +100,24 @@ public sealed class SnapshotTests
         var lastMessage = await pod.MetricAsync("pricestream_kafka_last_message_time_seconds");
         Assert.InRange(lastMessage, DateTimeOffset.UtcNow.AddMinutes(-1).ToUnixTimeSeconds(), DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 1);
         Assert.Equal(1, await pod.MetricAsync("pricestream_kafka_connected"));
-        Assert.Equal(2, await pod.MetricAsync("pricestream_kafka_messages_total"));
+        Assert.Equal(3, await pod.MetricAsync("pricestream_kafka_messages_total"));
+        Assert.Equal(2, await pod.MetricAsync("pricestream_kafka_messages_parsed_total"));
+        Assert.Equal(1, await pod.MetricAsync("pricestream_kafka_messages_failed_total"));
 
         await using var client = await SnapshotClient.ConnectAsync(pod.Url);
         await client.SubscribeAsync("DE");
         Assert.Equal(41m, (await client.NextAsync(TimeSpan.FromSeconds(5))).Price);
+        Assert.Equal(1, await pod.MetricAsync("pricestream_subscriptions", "symbol=\"DE\""));
+        Assert.Equal(1, await pod.MetricAsync("signalr_server_active_connections"));
 
         // After replay, new messages are broadcast.
         await Produce(producer, topic, 2, Price("DE", 43m, "2026-10-13T12:15:00Z"), DateTimeOffset.UtcNow);
         Assert.Equal(43m, (await client.NextAsync(TimeSpan.FromSeconds(20))).Price);
+
+        // Replayed messages are cached, not sent, so only the live tick has a publish latency.
+        Assert.Equal(1, await pod.MetricAsync("pricestream_publish_latency_seconds_count"));
+        await pod.WaitForMetricAsync("pricestream_kafka_consumer_lag", "partition=\"2\"", 0, TimeSpan.FromSeconds(10));
+        Assert.Equal(0, await pod.MetricAsync("pricestream_pipeline_queue_depth", "stage=\"queue\""));
     }
 
     [Fact(Timeout = 240_000)]
@@ -218,13 +234,58 @@ public sealed class SnapshotTests
             return response.StatusCode;
         }
 
-        public async Task<double> MetricAsync(string name)
+        public async Task<double> MetricAsync(string name, string label = "")
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
             var text = await http.GetStringAsync($"{Url}/metrics");
-            var line = text.Split('\n').FirstOrDefault(l => l.StartsWith(name + " ") || l.StartsWith(name + "{"))
-                ?? throw new InvalidOperationException($"{name} not in /metrics:\n{text}");
-            return double.Parse(line[(line.LastIndexOf(' ') + 1)..], System.Globalization.CultureInfo.InvariantCulture);
+            var line = text.Split('\n').FirstOrDefault(l =>
+                    (l.StartsWith(name + " ") || l.StartsWith(name + "{")) && l.Contains(label))
+                ?? throw new InvalidOperationException($"{name}{{{label}}} not in /metrics:\n{text}");
+            // Value is followed by an optional timestamp.
+            var parts = line[(line.LastIndexOf('}') + 1)..].Trim().Split(' ');
+            if (!line.Contains('{'))
+                parts = line.Split(' ')[1..];
+            return double.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        public async Task WaitUntilMetricGoneAsync(string name, string label, TimeSpan timeout)
+        {
+            var deadline = DateTime.UtcNow + timeout;
+            while (DateTime.UtcNow < deadline)
+            {
+                try
+                {
+                    await MetricAsync(name, label);
+                }
+                catch (InvalidOperationException)
+                {
+                    return;
+                }
+
+                await Task.Delay(200);
+            }
+
+            throw new TimeoutException($"{name}{{{label}}} is still reported.");
+        }
+
+        public async Task WaitForMetricAsync(string name, string label, double expected, TimeSpan timeout)
+        {
+            var deadline = DateTime.UtcNow + timeout;
+            while (true)
+            {
+                try
+                {
+                    if (await MetricAsync(name, label) == expected)
+                        return;
+                }
+                catch (InvalidOperationException) when (DateTime.UtcNow < deadline)
+                {
+                }
+
+                if (DateTime.UtcNow >= deadline)
+                    throw new TimeoutException($"{name}{{{label}}} did not reach {expected}.");
+                await Task.Delay(200);
+            }
         }
 
         public async Task WaitForStatusAsync(string path, HttpStatusCode expected, TimeSpan timeout)
