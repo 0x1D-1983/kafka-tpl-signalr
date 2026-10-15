@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using PriceStream.Health;
 using PriceStream.Hubs;
 using PriceStream.Services;
@@ -8,54 +9,65 @@ app.Run();
 
 public partial class Program
 {
+    private static readonly string LiveTag = "live";
+    private static readonly string ReadyTag = "ready";
+
     public static WebApplication Create(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
+        var services = builder.Services;
+        var configuration = builder.Configuration;
 
         // Configuration
-        builder.Services.Configure<KafkaOptions>(
-            builder.Configuration.GetSection(KafkaOptions.SectionName));
-        builder.Services.Configure<RedisOptions>(
-            builder.Configuration.GetSection(RedisOptions.SectionName));
+        services.Configure<KafkaOptions>(configuration.GetSection(KafkaOptions.SectionName));
+        services.Configure<RedisOptions>(configuration.GetSection(RedisOptions.SectionName));
 
-        var shutdownSeconds = builder.Configuration.GetValue<int?>("ShutdownTimeoutSeconds");
+        var shutdownSeconds = configuration.GetValue<int?>("ShutdownTimeoutSeconds");
         if (shutdownSeconds is > 0)
         {
-            builder.Services.Configure<HostOptions>(options =>
+            services.Configure<HostOptions>(options =>
                 options.ShutdownTimeout = TimeSpan.FromSeconds(shutdownSeconds.Value));
         }
 
         // Kafka → TPL Dataflow → SignalR pipeline (singleton pipeline, stateless for horizontal scaling)
-        builder.Services.AddSingleton<EpexDataflowPipeline>();
-        var kafkaEnabled = builder.Configuration.GetValue("Kafka:Enabled", true);
+        services.AddSingleton<EpexDataflowPipeline>();
+        var kafkaEnabled = configuration.GetValue("Kafka:Enabled", true);
         if (kafkaEnabled)
-            builder.Services.AddHostedService<KafkaEpexConsumerService>();
-        builder.Services.AddHostedService<SignalRPriceBroadcaster>();
+        {
+            services.AddHostedService<KafkaEpexConsumerService>();
+        }
+        services.AddHostedService<SignalRPriceBroadcaster>();
 
         // SignalR with optional Redis backplane: when multiple pods consume different Kafka partitions (symbols),
         // the backplane broadcasts group messages (e.g. symbol:DE, symbol:FR) to all pods so a client on one pod
         // can receive updates for symbols consumed by another pod.
-        var signalrBuilder = builder.Services.AddSignalR();
-        var redisConnection = builder.Configuration.GetValue<string>(RedisOptions.SectionName + ":Configuration");
+        var signalrBuilder = services.AddSignalR();
+        var redisConnection = configuration.GetValue<string>(RedisOptions.SectionName + ":Configuration");
         if (!string.IsNullOrWhiteSpace(redisConnection))
         {
             signalrBuilder.AddStackExchangeRedis(redisConnection, options =>
             {
-                var prefix = builder.Configuration.GetValue<string>(RedisOptions.SectionName + ":InstanceName");
+                var prefix = configuration.GetValue<string>(RedisOptions.SectionName + ":InstanceName");
                 if (!string.IsNullOrWhiteSpace(prefix))
                     options.Configuration.ChannelPrefix = StackExchange.Redis.RedisChannel.Literal(prefix);
             });
         }
 
         // Health checks for load balancer / Kubernetes: liveness = process alive, readiness = can serve traffic (Kafka + Redis when backplane enabled)
-        var healthChecks = builder.Services.AddHealthChecks()
-            .AddCheck("self", () => Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Healthy(), tags: new[] { "live" });
+        var healthChecks = services.AddHealthChecks()
+            .AddCheck("self", () => HealthCheckResult.Healthy(), tags: [ LiveTag ]);
+            
         if (kafkaEnabled)
-            healthChecks.AddCheck<KafkaHealthCheck>("kafka", tags: new[] { "ready" });
+        {
+            healthChecks.AddCheck<KafkaHealthCheck>("kafka", tags: [ ReadyTag ]);
+        }
+            
         if (!string.IsNullOrWhiteSpace(redisConnection))
-            healthChecks.AddRedis(redisConnection, "redis", tags: new[] { "ready" });
+        {
+            healthChecks.AddRedis(redisConnection, "redis", tags: [ ReadyTag ]);
+        }
 
-        builder.Services.AddRazorPages();
+        services.AddRazorPages();
 
         var app = builder.Build();
 
@@ -72,14 +84,14 @@ public partial class Program
         // Liveness: pod is alive (restart if fails)
         app.MapHealthChecks("/health/live", new HealthCheckOptions
         {
-            Predicate = reg => reg.Tags.Contains("live"),
+            Predicate = reg => reg.Tags.Contains(LiveTag),
             ResponseWriter = HealthResponseWriter.WriteMinimal
         }).AllowAnonymous();
 
         // Readiness: pod can receive traffic (LB stops sending if not ready)
         app.MapHealthChecks("/health/ready", new HealthCheckOptions
         {
-            Predicate = reg => reg.Tags.Contains("ready"),
+            Predicate = reg => reg.Tags.Contains(ReadyTag),
             ResponseWriter = HealthResponseWriter.WriteMinimal
         }).AllowAnonymous();
 
