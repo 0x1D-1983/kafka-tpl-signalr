@@ -4,13 +4,14 @@ using PriceStream.Models;
 namespace PriceStream.Services;
 
 /// <summary>
-/// TPL Dataflow pipeline: receives raw Kafka messages, parses to EPEX model, and broadcasts to linked blocks.
-/// Downstream (SignalR) subscribes to the broadcast block and filters by symbol per connection.
+/// Parses Kafka payloads and queues every accepted update for the linked target.
+/// Post returns false once the bounded queue is full. A full SignalR target postpones
+/// and the queue retains the message, so one slow symbol cannot overwrite another.
 /// </summary>
 public sealed class EpexDataflowPipeline
 {
     private readonly TransformManyBlock<string, EpexMarketData> _parseBlock;
-    private readonly BroadcastBlock<EpexMarketData> _broadcastBlock;
+    private readonly BufferBlock<EpexMarketData> _queue;
     private int _completed;
 
     public EpexDataflowPipeline()
@@ -23,11 +24,13 @@ public sealed class EpexDataflowPipeline
                 BoundedCapacity = 1000
             });
 
-        _broadcastBlock = new BroadcastBlock<EpexMarketData>(m => m);
+        // BroadcastBlock keeps a single value and overwrites it when the target postpones.
+        // A buffer retains every message and applies backpressure instead.
+        _queue = new BufferBlock<EpexMarketData>(new DataflowBlockOptions { BoundedCapacity = 1000 });
 
-        _parseBlock.LinkTo(_broadcastBlock, new DataflowLinkOptions { PropagateCompletion = true });
+        _parseBlock.LinkTo(_queue, new DataflowLinkOptions { PropagateCompletion = true });
         ObserveFault(_parseBlock.Completion);
-        ObserveFault(_broadcastBlock.Completion);
+        ObserveFault(_queue.Completion);
     }
 
     /// <summary>
@@ -39,12 +42,12 @@ public sealed class EpexDataflowPipeline
     }
 
     /// <summary>
-    /// Subscribe to the pipeline to receive all parsed EPEX messages. Used by SignalR broadcaster.
-    /// Completion and faults propagate to <paramref name="target"/>.
+    /// Link the target that receives every queued update. Messages posted before the link
+    /// stay in the queue. Completion and faults propagate to <paramref name="target"/>.
     /// </summary>
     public IDisposable LinkTo(ITargetBlock<EpexMarketData> target)
     {
-        return _broadcastBlock.LinkTo(target, new DataflowLinkOptions { PropagateCompletion = true });
+        return _queue.LinkTo(target, new DataflowLinkOptions { PropagateCompletion = true });
     }
 
     /// <summary>
@@ -75,12 +78,12 @@ public sealed class EpexDataflowPipeline
         get
         {
             var parseFaulted = _parseBlock.Completion.IsFaulted;
-            var broadcastFaulted = _broadcastBlock.Completion.IsFaulted;
-            if (!parseFaulted && !broadcastFaulted)
+            var queueFaulted = _queue.Completion.IsFaulted;
+            if (!parseFaulted && !queueFaulted)
                 return Array.Empty<string>();
-            if (parseFaulted && broadcastFaulted)
-                return ["parse", "broadcast"];
-            return parseFaulted ? ["parse"] : ["broadcast"];
+            if (parseFaulted && queueFaulted)
+                return ["parse", "queue"];
+            return parseFaulted ? ["parse"] : ["queue"];
         }
     }
 

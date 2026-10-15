@@ -31,6 +31,57 @@ public sealed class PipelineFailureTests
     }
 
     [Fact]
+    public async Task Full_target_keeps_every_symbol()
+    {
+        var pipeline = new EpexDataflowPipeline();
+        var processingFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var received = new List<string>();
+        var target = new ActionBlock<EpexMarketData>(async message =>
+        {
+            lock (received) received.Add(message.Symbol);
+            if (message.Symbol == "DE")
+            {
+                processingFirst.TrySetResult();
+                await release.Task;
+            }
+        }, new ExecutionDataflowBlockOptions { BoundedCapacity = 1, MaxDegreeOfParallelism = 1 });
+        using var link = pipeline.LinkTo(target);
+
+        Assert.True(pipeline.Post(SampleJson("DE", 1)));
+        await processingFirst.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        foreach (var symbol in new[] { "FR", "AT", "NL", "CH" })
+            Assert.True(pipeline.Post(SampleJson(symbol, 1)));
+
+        release.TrySetResult();
+        pipeline.Complete();
+        await target.Completion.WaitAsync(TimeSpan.FromSeconds(3));
+
+        lock (received)
+            Assert.Equal(new[] { "AT", "CH", "DE", "FR", "NL" }, received.OrderBy(symbol => symbol).ToArray());
+    }
+
+    [Fact]
+    public async Task Messages_posted_before_the_target_links_are_delivered()
+    {
+        var pipeline = new EpexDataflowPipeline();
+        foreach (var symbol in new[] { "DE", "FR", "AT" })
+            Assert.True(pipeline.Post(SampleJson(symbol, 1)));
+
+        var received = new List<string>();
+        var target = new ActionBlock<EpexMarketData>(message =>
+        {
+            lock (received) received.Add(message.Symbol);
+        });
+        using var link = pipeline.LinkTo(target);
+        pipeline.Complete();
+        await target.Completion.WaitAsync(TimeSpan.FromSeconds(3));
+
+        lock (received)
+            Assert.Equal(new[] { "AT", "DE", "FR" }, received.OrderBy(symbol => symbol).ToArray());
+    }
+
+    [Fact]
     public async Task Faulted_parse_block_is_named()
     {
         var pipeline = new EpexDataflowPipeline();
