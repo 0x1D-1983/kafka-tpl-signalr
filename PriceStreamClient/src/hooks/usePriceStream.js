@@ -13,11 +13,13 @@ export function usePriceStream(hubUrl) {
   const [subscribedSymbols, setSubscribedSymbols] = useState([])
   const connectionRef = useRef(null)
   const symbolsRef = useRef([])
+  const latestTimestampRef = useRef(new Map())
 
   const subscribe = useCallback(async (symbols) => {
     const normalized = normalizeSymbols(symbols)
     const previous = symbolsRef.current
     const removed = previous.filter((s) => !normalized.includes(s))
+    for (const symbol of removed) latestTimestampRef.current.delete(symbol)
     symbolsRef.current = normalized
     try {
       localStorage.setItem(STORAGE_KEY, normalized.join(','))
@@ -54,6 +56,14 @@ export function usePriceStream(hubUrl) {
     connection.on('PriceUpdate', (data) => {
       const symbol = String(data?.symbol ?? '').toUpperCase()
       if (!symbolsRef.current.includes(symbol)) return
+      // Source time is already on the payload. A late tick must not move an older price
+      // above a newer one when two sends for the same symbol pass each other.
+      const incoming = Date.parse(data?.timestamp ?? '')
+      if (Number.isFinite(incoming)) {
+        const latest = latestTimestampRef.current.get(symbol)
+        if (latest !== undefined && incoming < latest) return
+        latestTimestampRef.current.set(symbol, incoming)
+      }
       setUpdates((prev) => [{ ...data, id: crypto.randomUUID() }, ...prev].slice(0, 200))
     })
 

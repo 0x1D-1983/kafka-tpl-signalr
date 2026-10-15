@@ -3,9 +3,12 @@ using System.Reflection;
 using System.Text.Json;
 using System.Threading.Tasks.Dataflow;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Logging.Abstractions;
 using PriceStream.Health;
+using PriceStream.Hubs;
 using PriceStream.Models;
 using PriceStream.Services;
 using Xunit;
@@ -177,6 +180,30 @@ public sealed class PipelineFailureTests
         Assert.Equal(TaskStatus.RanToCompletion, targetCompletion.Status);
     }
 
+    [Fact]
+    public async Task Same_symbol_is_sent_one_at_a_time_while_other_symbols_overlap()
+    {
+        var pipeline = new EpexDataflowPipeline();
+        var proxy = new RecordingProxy();
+        using var broadcaster = new SignalRPriceBroadcaster(
+            new RecordingHubContext(proxy),
+            pipeline,
+            NullLogger<SignalRPriceBroadcaster>.Instance);
+
+        var symbols = new[] { "DE", "FR", "AT", "NL", "CH", "BE", "DK", "NO" };
+        foreach (var symbol in symbols)
+        {
+            for (var price = 1; price <= 3; price++)
+                Assert.True(pipeline.Post(SampleJson(symbol, price)));
+        }
+
+        await broadcaster.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+
+        foreach (var symbol in symbols)
+            Assert.Equal(1, proxy.MaxInFlight(symbol));
+        Assert.True(proxy.MaxInFlightOverall > 1, "Expected different symbols to send in parallel.");
+    }
+
     private static async Task<HttpStatusCode> StatusAsync(HttpClient http, string url)
     {
         Exception? last = null;
@@ -258,6 +285,72 @@ public sealed class PipelineFailureTests
             }
 
             await App.DisposeAsync();
+        }
+    }
+}
+
+sealed class RecordingHubContext : IHubContext<PriceStreamHub>
+{
+    public RecordingHubContext(RecordingProxy proxy) => Clients = new RecordingClients(proxy);
+
+    public IHubClients Clients { get; }
+    public IGroupManager Groups => throw new NotSupportedException();
+}
+
+sealed class RecordingClients : IHubClients
+{
+    private readonly RecordingProxy _proxy;
+
+    public RecordingClients(RecordingProxy proxy) => _proxy = proxy;
+
+    public IClientProxy Group(string groupName) => _proxy;
+    public IClientProxy All => throw new NotSupportedException();
+    public IClientProxy AllExcept(IReadOnlyList<string> excludedConnectionIds) => throw new NotSupportedException();
+    public IClientProxy Client(string connectionId) => throw new NotSupportedException();
+    public IClientProxy Clients(IReadOnlyList<string> connectionIds) => throw new NotSupportedException();
+    public IClientProxy GroupExcept(string groupName, IReadOnlyList<string> excludedConnectionIds) => throw new NotSupportedException();
+    public IClientProxy Groups(IReadOnlyList<string> groupNames) => throw new NotSupportedException();
+    public IClientProxy User(string userId) => throw new NotSupportedException();
+    public IClientProxy Users(IReadOnlyList<string> userIds) => throw new NotSupportedException();
+}
+
+sealed class RecordingProxy : IClientProxy
+{
+    private readonly object _gate = new();
+    private readonly Dictionary<string, int> _inFlight = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _maxInFlight = new(StringComparer.OrdinalIgnoreCase);
+    private int _overall;
+    private int _maxOverall;
+
+    public int MaxInFlightOverall
+    {
+        get { lock (_gate) return _maxOverall; }
+    }
+
+    public int MaxInFlight(string symbol)
+    {
+        lock (_gate) return _maxInFlight.GetValueOrDefault(symbol);
+    }
+
+    public async Task SendCoreAsync(string method, object?[] args, CancellationToken cancellationToken)
+    {
+        var message = (EpexMarketData)args[0]!;
+        var symbol = message.Symbol.ToUpperInvariant();
+        lock (_gate)
+        {
+            var inFlight = _inFlight.GetValueOrDefault(symbol) + 1;
+            _inFlight[symbol] = inFlight;
+            _maxInFlight[symbol] = Math.Max(_maxInFlight.GetValueOrDefault(symbol), inFlight);
+            _overall++;
+            _maxOverall = Math.Max(_maxOverall, _overall);
+        }
+
+        await Task.Delay(40, cancellationToken);
+
+        lock (_gate)
+        {
+            _inFlight[symbol]--;
+            _overall--;
         }
     }
 }

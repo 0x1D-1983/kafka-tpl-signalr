@@ -7,6 +7,7 @@ namespace PriceStream.Services;
 
 /// <summary>
 /// Consumes from the EPEX dataflow pipeline and broadcasts each message to SignalR groups by symbol.
+/// Ticks for one symbol stay on a single lane so a slower send cannot finish after a newer one.
 /// A faulted block fails this service so the host exits and Kubernetes restarts the pod.
 /// Shutdown completes the pipeline and drains queued broadcasts.
 /// </summary>
@@ -18,10 +19,17 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
     /// </summary>
     private static readonly TimeSpan DrainTimeout = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// Parallel sends are split by symbol so one symbol is never in flight on two lanes.
+    /// </summary>
+    private const int LaneCount = 4;
+
     private readonly IHubContext<PriceStreamHub> _hubContext;
     private readonly EpexDataflowPipeline _pipeline;
     private readonly ILogger<SignalRPriceBroadcaster> _logger;
     private readonly ActionBlock<EpexMarketData> _targetBlock;
+    private readonly ActionBlock<EpexMarketData>[] _lanes;
+    private readonly TaskCompletionSource _faulted = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly IDisposable _link;
 
     public SignalRPriceBroadcaster(
@@ -32,29 +40,52 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
         _hubContext = hubContext;
         _pipeline = pipeline;
         _logger = logger;
+        _lanes = new ActionBlock<EpexMarketData>[LaneCount];
+        for (var i = 0; i < _lanes.Length; i++)
+        {
+            _lanes[i] = new ActionBlock<EpexMarketData>(
+                OnMessageAsync,
+                new ExecutionDataflowBlockOptions
+                {
+                    MaxDegreeOfParallelism = 1,
+                    BoundedCapacity = 500,
+                    EnsureOrdered = true
+                });
+            WatchFault(_lanes[i].Completion);
+        }
+
+        // Single reader into the lanes, so two ticks for one symbol are queued in arrival order.
         _targetBlock = new ActionBlock<EpexMarketData>(
-            OnMessageAsync,
+            RouteAsync,
             new ExecutionDataflowBlockOptions
             {
-                MaxDegreeOfParallelism = 4,
-                BoundedCapacity = 500
+                MaxDegreeOfParallelism = 1,
+                BoundedCapacity = 500,
+                EnsureOrdered = true
             });
+        _targetBlock.Completion.ContinueWith(
+            static (completed, state) => CompleteLanes((ActionBlock<EpexMarketData>[])state!, completed),
+            _lanes,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+        WatchFault(_targetBlock.Completion);
         // Linked up front so shutdown can propagate completion into this block even if ExecuteAsync has not started.
         _link = _pipeline.LinkTo(_targetBlock);
-        ObserveFault(_targetBlock.Completion);
     }
 
     /// <summary>
-    /// True when the SignalR action block has faulted. A faulted block does not recover.
+    /// True when the router or any symbol lane has faulted. A faulted block does not recover.
     /// </summary>
-    public bool IsFaulted => _targetBlock.Completion.IsFaulted;
+    public bool IsFaulted =>
+        _targetBlock.Completion.IsFaulted || Array.Exists(_lanes, static lane => lane.Completion.IsFaulted);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         try
         {
-            // A faulted completion throws here. The host stops, and Kubernetes restarts the pod.
-            await _targetBlock.Completion.WaitAsync(stoppingToken);
+            // A faulted router or lane completes this task. The host stops, and Kubernetes restarts the pod.
+            await _faulted.Task.WaitAsync(stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -77,7 +108,7 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
         drain.CancelAfter(DrainTimeout);
         try
         {
-            await _targetBlock.Completion.WaitAsync(drain.Token);
+            await Task.WhenAll(_lanes.Append(_targetBlock).Select(static block => block.Completion)).WaitAsync(drain.Token);
         }
         catch (OperationCanceledException)
         {
@@ -99,12 +130,56 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
         base.Dispose();
     }
 
-    private static void ObserveFault(Task completion) =>
+    private void WatchFault(Task completion) =>
         _ = completion.ContinueWith(
-            static completed => _ = completed.Exception,
+            completed => _faulted.TrySetException(completed.Exception!.GetBaseException()),
             CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+
+    private static void CompleteLanes(ActionBlock<EpexMarketData>[] lanes, Task routerCompletion)
+    {
+        var error = routerCompletion.IsFaulted ? routerCompletion.Exception?.GetBaseException() : null;
+        foreach (var lane in lanes)
+        {
+            try
+            {
+                if (error is null)
+                    lane.Complete();
+                else
+                    ((IDataflowBlock)lane).Fault(error);
+            }
+            catch (InvalidOperationException)
+            {
+                // Lane already completed or faulted.
+            }
+        }
+    }
+
+    private static int LaneIndex(string symbol)
+    {
+        var hash = StringComparer.OrdinalIgnoreCase.GetHashCode(symbol);
+        return (hash & int.MaxValue) % LaneCount;
+    }
+
+    private Task RouteAsync(EpexMarketData message)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(message.Symbol))
+            {
+                _logger.LogWarning("Dropping price update with no symbol");
+                return Task.CompletedTask;
+            }
+
+            return _lanes[LaneIndex(message.Symbol)].SendAsync(message);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to route price update");
+            return Task.CompletedTask;
+        }
+    }
 
     private async Task OnMessageAsync(EpexMarketData message)
     {

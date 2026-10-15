@@ -21,7 +21,9 @@ public sealed class EpexDataflowPipeline
             new ExecutionDataflowBlockOptions
             {
                 MaxDegreeOfParallelism = DataflowBlockOptions.Unbounded,
-                BoundedCapacity = 1000
+                BoundedCapacity = 1000,
+                // Hold later results until earlier inputs finish so the queue stays in arrival order.
+                EnsureOrdered = true
             });
 
         // BroadcastBlock keeps a single value and overwrites it when the target postpones.
