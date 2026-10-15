@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using PriceStream.Hubs;
 using PriceStream.Models;
 using PriceStream.Services;
 using Xunit;
@@ -98,7 +99,7 @@ sealed class SubscribingClient : IAsyncDisposable
         connection.HandshakeTimeout = TimeSpan.FromSeconds(10);
 
         var client = new SubscribingClient(connection);
-        connection.On<EpexMarketData>("PriceUpdate", update =>
+        connection.On<EpexMarketData>(nameof(IPriceClient.PriceUpdate), update =>
         {
             client._seen.Enqueue($"{update.Symbol}={update.Price}");
             client._updates.Writer.TryWrite(update);

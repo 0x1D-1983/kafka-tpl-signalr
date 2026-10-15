@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.DependencyInjection;
+using PriceStream.Hubs;
 using PriceStream.Models;
 using PriceStream.Services;
 using Testcontainers.Kafka;
@@ -199,7 +200,7 @@ public sealed class SnapshotTests
                 .WithUrl($"{url}/hubs/pricestream", options => options.Transports = HttpTransportType.WebSockets)
                 .Build();
             var client = new SnapshotClient(connection);
-            connection.On<EpexMarketData>("PriceUpdate", update => client._updates.Writer.TryWrite(update));
+            connection.On<EpexMarketData>(nameof(IPriceClient.PriceUpdate), update => client._updates.Writer.TryWrite(update));
             await connection.StartAsync();
             return client;
         }

@@ -291,32 +291,32 @@ public sealed class PipelineFailureTests
     }
 }
 
-sealed class RecordingHubContext : IHubContext<PriceStreamHub>
+sealed class RecordingHubContext : IHubContext<PriceStreamHub, IPriceClient>
 {
     public RecordingHubContext(RecordingProxy proxy) => Clients = new RecordingClients(proxy);
 
-    public IHubClients Clients { get; }
+    public IHubClients<IPriceClient> Clients { get; }
     public IGroupManager Groups => throw new NotSupportedException();
 }
 
-sealed class RecordingClients : IHubClients
+sealed class RecordingClients : IHubClients<IPriceClient>
 {
     private readonly RecordingProxy _proxy;
 
     public RecordingClients(RecordingProxy proxy) => _proxy = proxy;
 
-    public IClientProxy Group(string groupName) => _proxy;
-    public IClientProxy All => throw new NotSupportedException();
-    public IClientProxy AllExcept(IReadOnlyList<string> excludedConnectionIds) => throw new NotSupportedException();
-    public IClientProxy Client(string connectionId) => throw new NotSupportedException();
-    public IClientProxy Clients(IReadOnlyList<string> connectionIds) => throw new NotSupportedException();
-    public IClientProxy GroupExcept(string groupName, IReadOnlyList<string> excludedConnectionIds) => throw new NotSupportedException();
-    public IClientProxy Groups(IReadOnlyList<string> groupNames) => throw new NotSupportedException();
-    public IClientProxy User(string userId) => throw new NotSupportedException();
-    public IClientProxy Users(IReadOnlyList<string> userIds) => throw new NotSupportedException();
+    public IPriceClient Group(string groupName) => _proxy;
+    public IPriceClient All => throw new NotSupportedException();
+    public IPriceClient AllExcept(IReadOnlyList<string> excludedConnectionIds) => throw new NotSupportedException();
+    public IPriceClient Client(string connectionId) => throw new NotSupportedException();
+    public IPriceClient Clients(IReadOnlyList<string> connectionIds) => throw new NotSupportedException();
+    public IPriceClient GroupExcept(string groupName, IReadOnlyList<string> excludedConnectionIds) => throw new NotSupportedException();
+    public IPriceClient Groups(IReadOnlyList<string> groupNames) => throw new NotSupportedException();
+    public IPriceClient User(string userId) => throw new NotSupportedException();
+    public IPriceClient Users(IReadOnlyList<string> userIds) => throw new NotSupportedException();
 }
 
-sealed class RecordingProxy : IClientProxy
+sealed class RecordingProxy : IPriceClient
 {
     private readonly object _gate = new();
     private readonly Dictionary<string, int> _inFlight = new(StringComparer.OrdinalIgnoreCase);
@@ -334,10 +334,9 @@ sealed class RecordingProxy : IClientProxy
         lock (_gate) return _maxInFlight.GetValueOrDefault(symbol);
     }
 
-    public async Task SendCoreAsync(string method, object?[] args, CancellationToken cancellationToken)
+    public async Task PriceUpdate(EpexMarketData message)
     {
-        var message = (EpexMarketData)args[0]!;
-        var symbol = message.Symbol.ToUpperInvariant();
+        var symbol = message.Symbol;
         lock (_gate)
         {
             var inFlight = _inFlight.GetValueOrDefault(symbol) + 1;
@@ -347,7 +346,7 @@ sealed class RecordingProxy : IClientProxy
             _maxOverall = Math.Max(_maxOverall, _overall);
         }
 
-        await Task.Delay(40, cancellationToken);
+        await Task.Delay(40);
 
         lock (_gate)
         {

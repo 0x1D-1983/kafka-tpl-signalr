@@ -24,7 +24,7 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
     /// </summary>
     private const int LaneCount = 4;
 
-    private readonly IHubContext<PriceStreamHub> _hubContext;
+    private readonly IHubContext<PriceStreamHub, IPriceClient> _hubContext;
     private readonly EpexDataflowPipeline _pipeline;
     private readonly ILastPriceCache _lastPrices;
     private readonly SubscriptionPolicy _policy;
@@ -35,7 +35,7 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
     private readonly IDisposable _link;
 
     public SignalRPriceBroadcaster(
-        IHubContext<PriceStreamHub> hubContext,
+        IHubContext<PriceStreamHub, IPriceClient> hubContext,
         EpexDataflowPipeline pipeline,
         ILastPriceCache lastPrices,
         SubscriptionPolicy policy,
@@ -212,7 +212,7 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
                 }
             }
 
-            await _hubContext.Clients.Group(group).SendAsync("PriceUpdate", message, CancellationToken.None);
+            await _hubContext.Clients.Group(group).PriceUpdate(message);
         }
         catch (Exception ex)
         {

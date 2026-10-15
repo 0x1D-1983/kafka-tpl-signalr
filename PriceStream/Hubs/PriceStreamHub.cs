@@ -3,7 +3,7 @@ using PriceStream.Services;
 
 namespace PriceStream.Hubs;
 
-public sealed class PriceStreamHub : Hub
+public sealed class PriceStreamHub : Hub<IPriceClient>
 {
     private static readonly object SubscriptionsKey = new();
 
@@ -149,7 +149,7 @@ public sealed class PriceStreamHub : Hub
         {
             var snapshot = await _lastPrices.GetAsync(symbols);
             foreach (var price in snapshot)
-                await Clients.Caller.SendAsync("PriceUpdate", price, Context.ConnectionAborted);
+                await Clients.Caller.PriceUpdate(price);
         }
         catch (OperationCanceledException) when (Context.ConnectionAborted.IsCancellationRequested)
         {
