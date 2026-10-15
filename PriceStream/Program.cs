@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using PriceStream.Health;
 using PriceStream.Hubs;
@@ -61,15 +62,46 @@ public partial class Program
 
         services.AddProblemDetails();
 
+        // TLS terminates at the edge. Trust X-Forwarded-For/Proto only from configured proxy addresses
+        // (loopback is always trusted), so Request.Scheme and RemoteIpAddress reflect the client.
+        var knownNetworks = configuration.GetSection("ForwardedHeaders:KnownNetworks").Get<string[]>() ?? [];
+        var knownProxies = configuration.GetSection("ForwardedHeaders:KnownProxies").Get<string[]>() ?? [];
+        services.Configure<ForwardedHeadersOptions>(options =>
+        {
+            options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+            // Envoy is the only hop in front of the pods.
+            options.ForwardLimit = 1;
+            foreach (var network in knownNetworks)
+                options.KnownIPNetworks.Add(System.Net.IPNetwork.Parse(network));
+            foreach (var proxy in knownProxies)
+                options.KnownProxies.Add(System.Net.IPAddress.Parse(proxy));
+        });
+
+        // Off by default: the edge owns HTTP->HTTPS redirects. Enable only when clients can reach
+        // the pods over plain HTTP without going through a TLS-terminating proxy.
+        var httpsRedirect = configuration.GetValue("Https:Redirect", false);
+        if (httpsRedirect)
+            services.AddHttpsRedirection(options => options.HttpsPort = configuration.GetValue("Https:Port", 443));
+
         var app = builder.Build();
+
+        app.UseForwardedHeaders();
 
         if (!app.Environment.IsDevelopment())
         {
             app.UseExceptionHandler();
+            // Only emitted on HTTPS requests, which after UseForwardedHeaders includes TLS terminated at the edge.
             app.UseHsts();
         }
 
-        app.UseHttpsRedirection();
+        if (httpsRedirect)
+        {
+            // Kubelet probes call the pod IP over plain HTTP and must never see a 307.
+            app.UseWhen(
+                context => !context.Request.Path.StartsWithSegments("/health"),
+                branch => branch.UseHttpsRedirection());
+        }
+
         app.UseRouting();
         app.UseAuthorization();
 

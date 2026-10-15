@@ -77,6 +77,7 @@ Manifests under [`k8s/`](../k8s/) run three stateless replicas behind Envoy and 
 - **Liveness probe**: `GET /health/live` → 200 = process is up and the pipeline has not faulted. A failure restarts the container.
 - **Readiness probe**: `GET /health/ready` → 200 when Kafka is reachable and the startup replay is done. The Service and Envoy only send traffic to ready pods.
 - **Replicas**: 3, rolling update `maxUnavailable: 0` / `maxSurge: 1`, PodDisruptionBudget `minAvailable: 2`. A deploy brings a new pod up, and lets it catch up, before taking an old one down.
+- **Behind the edge**: TLS terminates at the edge, so the app does not redirect to HTTPS by default (`Https:Redirect=false`). `X-Forwarded-For` and `X-Forwarded-Proto` are honoured only from `ForwardedHeaders:KnownNetworks` / `KnownProxies` (the kind pod CIDR in the Deployment). If `Https:Redirect` is enabled, `/health/*` is still never redirected, so probes never see a 307.
 - **Every replica reads all partitions.** The broker auto-creates `epex-market-data` with 3 partitions; the count is independent of the replica count.
 
 ### When a pod dies
