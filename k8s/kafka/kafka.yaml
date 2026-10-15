@@ -1,5 +1,5 @@
-# Single-node KRaft broker for the kind cluster. Three partitions match the three PriceStream
-# replicas so the shared consumer group can assign one partition per pod.
+# Single-node KRaft broker for the kind cluster. Every PriceStream replica reads all partitions,
+# so the partition count is independent of the replica count.
 apiVersion: v1
 kind: Service
 metadata:

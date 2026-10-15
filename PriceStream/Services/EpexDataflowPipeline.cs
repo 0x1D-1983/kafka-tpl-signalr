@@ -98,17 +98,21 @@ public sealed class EpexDataflowPipeline
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
 
-    private static IEnumerable<EpexMarketData> ParseEpexMessages(string raw)
+    public static bool TryParse(string? raw, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out EpexMarketData? message)
     {
-        if (string.IsNullOrWhiteSpace(raw)) return [];
+        message = null;
+        if (string.IsNullOrWhiteSpace(raw)) return false;
         try
         {
-            var item = System.Text.Json.JsonSerializer.Deserialize<EpexMarketData>(raw);
-            return item is not null ? [item] : [];
+            message = System.Text.Json.JsonSerializer.Deserialize<EpexMarketData>(raw);
+            return message is not null;
         }
         catch
         {
-            return [];
+            return false;
         }
     }
+
+    private static IEnumerable<EpexMarketData> ParseEpexMessages(string raw) =>
+        TryParse(raw, out var message) ? [message] : [];
 }

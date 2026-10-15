@@ -20,7 +20,6 @@ public partial class Program
 
         // Configuration
         services.Configure<KafkaOptions>(configuration.GetSection(KafkaOptions.SectionName));
-        services.Configure<RedisOptions>(configuration.GetSection(RedisOptions.SectionName));
         services.Configure<SubscriptionOptions>(configuration.GetSection(SubscriptionOptions.SectionName));
         services.AddSingleton<SubscriptionPolicy>();
 
@@ -33,8 +32,11 @@ public partial class Program
                 options.ShutdownTimeout = TimeSpan.FromSeconds(shutdownSeconds.Value);
         });
 
-        // Kafka → TPL Dataflow → SignalR pipeline (singleton pipeline, stateless for horizontal scaling)
+        // Kafka → TPL Dataflow → SignalR. Every pod reads the whole topic and sends only to its own
+        // connections, so there is no backplane and the last-price cache can be local.
         services.AddSingleton<EpexDataflowPipeline>();
+        services.AddSingleton<ILastPriceCache, InMemoryLastPriceCache>();
+        services.AddSingleton<KafkaCatchUpState>();
         var kafkaEnabled = configuration.GetValue("Kafka:Enabled", true);
         if (kafkaEnabled)
         {
@@ -43,39 +45,10 @@ public partial class Program
         services.AddSingleton<SignalRPriceBroadcaster>();
         services.AddHostedService(sp => sp.GetRequiredService<SignalRPriceBroadcaster>());
 
-        // SignalR with optional Redis backplane: when multiple pods consume different Kafka partitions (symbols),
-        // the backplane broadcasts group messages (e.g. symbol:DE, symbol:FR) to all pods so a client on one pod
-        // can receive updates for symbols consumed by another pod.
-        var signalrBuilder = services.AddSignalR();
-        var redisConnection = configuration.GetValue<string>(RedisOptions.SectionName + ":Configuration");
-        var redisInstanceName = configuration.GetValue<string>(RedisOptions.SectionName + ":InstanceName");
-        if (!string.IsNullOrWhiteSpace(redisConnection))
-        {
-            signalrBuilder.AddStackExchangeRedis(redisConnection, options =>
-            {
-                if (!string.IsNullOrWhiteSpace(redisInstanceName))
-                    options.Configuration.ChannelPrefix = StackExchange.Redis.RedisChannel.Literal(redisInstanceName);
-            });
-
-            // Last-price snapshots live in Redis so a pod can serve symbols another pod consumes.
-            services.AddSingleton<StackExchange.Redis.IConnectionMultiplexer>(_ =>
-            {
-                var options = StackExchange.Redis.ConfigurationOptions.Parse(redisConnection);
-                options.AbortOnConnectFail = false;
-                return StackExchange.Redis.ConnectionMultiplexer.Connect(options);
-            });
-            services.AddSingleton<ILastPriceCache>(sp => new RedisLastPriceCache(
-                sp.GetRequiredService<StackExchange.Redis.IConnectionMultiplexer>(),
-                redisInstanceName,
-                sp.GetRequiredService<ILogger<RedisLastPriceCache>>()));
-        }
-        else
-        {
-            services.AddSingleton<ILastPriceCache, InMemoryLastPriceCache>();
-        }
+        services.AddSignalR();
 
         // Liveness: process is up and the dataflow pipeline has not faulted (restart if it fails).
-        // Readiness: can serve traffic (pipeline, Kafka, and Redis when the backplane is enabled).
+        // Readiness: can serve traffic (pipeline, Kafka reachable, startup replay finished).
         var healthChecks = services.AddHealthChecks()
             .AddCheck("self", () => HealthCheckResult.Healthy(), tags: [ LiveTag ])
             .AddCheck<PipelineHealthCheck>("pipeline", tags: [ LiveTag, ReadyTag ]);
@@ -83,11 +56,7 @@ public partial class Program
         if (kafkaEnabled)
         {
             healthChecks.AddCheck<KafkaHealthCheck>("kafka", tags: [ ReadyTag ]);
-        }
-            
-        if (!string.IsNullOrWhiteSpace(redisConnection))
-        {
-            healthChecks.AddRedis(redisConnection, "redis", tags: [ ReadyTag ]);
+            healthChecks.AddCheck<KafkaCatchUpHealthCheck>("kafka-catchup", tags: [ ReadyTag ]);
         }
 
         services.AddRazorPages();
@@ -111,7 +80,7 @@ public partial class Program
             ResponseWriter = HealthResponseWriter.WriteMinimal
         }).AllowAnonymous();
 
-        // Readiness: pod can receive traffic (pipeline, Kafka, Redis). LB stops sending if not ready.
+        // Readiness: pod can receive traffic (pipeline, Kafka, replay done). LB stops sending if not ready.
         app.MapHealthChecks("/health/ready", new HealthCheckOptions
         {
             Predicate = reg => reg.Tags.Contains(ReadyTag),

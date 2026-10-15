@@ -1,4 +1,4 @@
-# Node (pricestream.io/pool=app): PriceStream, edge Envoy, Redis, and Kafka.
+# Node (pricestream.io/pool=app): PriceStream, edge Envoy, and Kafka.
 # The edge NodePort is published as localhost:8080.
 # kind nodes share the host's CPU/RAM, so budgets are the pod requests/limits, not the node size.
 kind: Cluster

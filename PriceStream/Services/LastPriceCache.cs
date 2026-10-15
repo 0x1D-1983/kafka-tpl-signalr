@@ -1,7 +1,5 @@
 using System.Collections.Concurrent;
-using System.Text.Json;
 using PriceStream.Models;
-using StackExchange.Redis;
 
 namespace PriceStream.Services;
 
@@ -19,8 +17,7 @@ public interface ILastPriceCache
 }
 
 /// <summary>
-/// Single-pod cache. With several pods each one only sees the symbols from its own Kafka partitions,
-/// so use <see cref="RedisLastPriceCache"/> whenever the backplane is enabled.
+/// Per-pod cache. Every pod reads the whole topic, so each one holds every symbol.
 /// </summary>
 public sealed class InMemoryLastPriceCache : ILastPriceCache
 {
@@ -46,75 +43,5 @@ public sealed class InMemoryLastPriceCache : ILastPriceCache
         }
 
         return Task.FromResult<IReadOnlyList<EpexMarketData>>(found);
-    }
-}
-
-/// <summary>
-/// Shared across pods: whichever pod consumes a symbol writes it, and any pod can serve the snapshot.
-/// </summary>
-public sealed class RedisLastPriceCache : ILastPriceCache
-{
-    // Compare-and-set on the source timestamp. After a Kafka rebalance two pods can briefly
-    // write the same symbol, and the older tick must not win.
-    private const string SetIfNewerScript = """
-        local current = redis.call('HGET', KEYS[2], ARGV[1])
-        if current and tonumber(current) > tonumber(ARGV[2]) then
-          return 0
-        end
-        redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
-        redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
-        return 1
-        """;
-
-    private readonly IConnectionMultiplexer _redis;
-    private readonly RedisKey[] _keys;
-    private readonly ILogger<RedisLastPriceCache> _logger;
-
-    public RedisLastPriceCache(IConnectionMultiplexer redis, string? instanceName, ILogger<RedisLastPriceCache> logger)
-    {
-        _redis = redis;
-        _logger = logger;
-        // The hash tag keeps both keys in one slot so the script also runs on Redis Cluster.
-        var prefix = string.IsNullOrWhiteSpace(instanceName) ? "pricestream" : instanceName;
-        _keys = [$"{{{prefix}}}:last-price", $"{{{prefix}}}:last-price-ts"];
-    }
-
-    public Task SetAsync(string symbol, EpexMarketData value)
-    {
-        // Fire-and-forget keeps Redis latency off the broadcast path. Commands on one
-        // multiplexer stay in order, and the script rejects older timestamps regardless.
-        _ = _redis.GetDatabase().ScriptEvaluate(
-            SetIfNewerScript,
-            _keys,
-            [symbol, value.Timestamp.ToUnixTimeMilliseconds(), JsonSerializer.Serialize(value)],
-            CommandFlags.FireAndForget);
-        return Task.CompletedTask;
-    }
-
-    public async Task<IReadOnlyList<EpexMarketData>> GetAsync(IReadOnlyCollection<string> symbols)
-    {
-        if (symbols.Count == 0)
-            return [];
-
-        var fields = symbols.Select(symbol => (RedisValue)symbol).ToArray();
-        var values = await _redis.GetDatabase().HashGetAsync(_keys[0], fields);
-
-        var found = new List<EpexMarketData>(values.Length);
-        foreach (var value in values)
-        {
-            if (value.IsNullOrEmpty)
-                continue;
-            try
-            {
-                if (JsonSerializer.Deserialize<EpexMarketData>(value.ToString()) is { } price)
-                    found.Add(price);
-            }
-            catch (JsonException ex)
-            {
-                _logger.LogWarning(ex, "Ignoring unreadable cached price");
-            }
-        }
-
-        return found;
     }
 }

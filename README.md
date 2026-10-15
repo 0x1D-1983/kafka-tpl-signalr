@@ -1,6 +1,6 @@
 # SignalR + Kafka EPEX Price Stream
 
-EPEX market data pipeline: **Kafka → TPL Dataflow → SignalR**, with a React client that subscribes to symbols and receives live price updates. Built for high availability (stateless pods, Redis backplane, health checks).
+EPEX market data pipeline: **Kafka → TPL Dataflow → SignalR**, with a React client that subscribes to symbols and receives live price updates. Built for high availability (stateless pods that each read the whole topic, health checks).
 
 ## Repo layout
 
@@ -9,7 +9,7 @@ EPEX market data pipeline: **Kafka → TPL Dataflow → SignalR**, with a React 
 | [**PriceStream/**](PriceStream/README.md) | ASP.NET Core backend: Kafka consumer, TPL Dataflow pipeline, SignalR hub at `/hubs/pricestream`. Health: `/health/live`, `/health/ready`. |
 | [**PriceStreamClient/**](PriceStreamClient/README.md) | React (Vite) app that connects to the hub, subscribes to symbols, and shows price updates. Auto-resubscribes on reconnect. |
 | **docker-compose.yml** | Local Kafka (Zookeeper + broker) and Confluent Control Center for development. |
-| [**k8s/**](k8s/) | kind manifests: 3 PriceStream replicas, Envoy edge, Redis backplane, Kafka. |
+| [**k8s/**](k8s/) | kind manifests: 3 PriceStream replicas, Envoy edge, Kafka. |
 | **skaffold.yaml** | Build the PriceStream image and deploy the manifests. |
 
 ## Quick start
@@ -46,7 +46,6 @@ k8s/
   namespace.yaml                 pricestream namespace
   kind-cluster.yaml              kind cluster; edge NodePort published as localhost:8080
   pricestream/pricestream.yaml   3 stateless replicas, probes, PDB, NetworkPolicy
-  redis/redis.yaml               SignalR backplane (pub/sub)
   kafka/kafka.yaml               single-node KRaft broker, 3 partitions
   mock/                          publishes mock EpexMarketData for delivery areas DE and FR
   edge/                          Envoy: /hubs/* only, cookie affinity, active health checks
@@ -76,7 +75,7 @@ kubectl exec -i deploy/kafka -- /opt/kafka/bin/kafka-console-producer.sh \
 EOF
 ```
 
-Three pods share the `pricestream-signalr` consumer group. Envoy sticks a client to one pod for the negotiate request and the WebSocket. Redis pub/sub delivers symbol groups to every pod, so a client still receives symbols consumed elsewhere. If that pod crashes or is drained, Envoy removes it and the React client reconnects onto another ready pod, then resubscribes.
+Each of the three pods reads every partition of the topic and sends only to its own connections. Envoy sticks a client to one pod for the negotiate request and the WebSocket. If that pod crashes or is drained, Envoy removes it and the React client reconnects onto another ready pod, then resubscribes and gets the cached prices straight away.
 
 Point the React dev server at the edge:
 
@@ -93,5 +92,5 @@ kind delete cluster --name pricestream
 
 ## Docs
 
-- [PriceStream backend](PriceStream/README.md) — Architecture, configuration, Redis backplane, Kubernetes, Kafka message format.
+- [PriceStream backend](PriceStream/README.md) — Architecture, configuration, Kafka fan-out and replay, Kubernetes, Kafka message format.
 - [PriceStreamClient](PriceStreamClient/README.md) — React app setup, proxy, and custom hub URL.

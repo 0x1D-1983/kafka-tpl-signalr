@@ -1,6 +1,6 @@
-# Stateless SignalR replicas. Each pod consumes a share of the Kafka topic (same consumer group)
-# and publishes symbol groups through the Redis backplane, so a client on any pod receives every
-# symbol it subscribed to. Pods hold no shared state: a reconnect lands on whichever replica is ready.
+# Stateless SignalR replicas. Every pod reads every partition of the Kafka topic and sends only to
+# its own connections, so there is no backplane. Pods hold no shared state: a reconnect lands on
+# whichever replica is ready, and that replica already has every symbol.
 apiVersion: v1
 kind: Service
 metadata:
@@ -14,7 +14,7 @@ spec:
       targetPort: http
 ---
 # Headless Service so Envoy's STRICT_DNS cluster sees one address per ready pod and can health-check
-# them individually. Unready pods (startup, Kafka/Redis down, terminating) are omitted.
+# them individually. Unready pods (startup replay, Kafka down, terminating) are omitted.
 apiVersion: v1
 kind: Service
 metadata:
@@ -78,13 +78,12 @@ spec:
               value: kafka:9092
             - name: Kafka__Topic
               value: epex-market-data
+            # Prefix only; the pod name is appended so each pod has its own group.id. Nothing is committed.
             - name: Kafka__ConsumerGroupId
               value: pricestream-signalr
-            # abortConnect=false: the process stays up while Redis starts; readiness stays false until it connects.
-            - name: Redis__Configuration
-              value: redis:6379,abortConnect=false
-            - name: Redis__InstanceName
-              value: pricestream
+            # Read into the last-price cache at startup; readiness stays false until the pod catches up.
+            - name: Kafka__ReplayWindowSeconds
+              value: "900"
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

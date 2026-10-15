@@ -1,14 +1,15 @@
+using System.Net;
 using System.Text.Json;
 using System.Threading.Channels;
+using Confluent.Kafka;
+using Confluent.Kafka.Admin;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging.Abstractions;
 using PriceStream.Models;
 using PriceStream.Services;
-using StackExchange.Redis;
-using Testcontainers.Redis;
+using Testcontainers.Kafka;
 using Xunit;
 
 namespace PriceStream.Tests;
@@ -57,46 +58,49 @@ public sealed class SnapshotTests
         await client.ExpectNothingAsync(TimeSpan.FromMilliseconds(300));
     }
 
-    [Fact(Timeout = 180_000)]
-    public async Task Snapshot_comes_from_redis_when_another_pod_consumed_the_symbol()
+    [Fact(Timeout = 240_000)]
+    public async Task New_pod_replays_the_window_into_its_cache_before_it_is_ready()
     {
-        var redis = new RedisBuilder("redis:7-alpine").Build();
-        await using var redisLifetime = redis;
-        await redis.StartAsync();
-        var configuration = RedisConfiguration(redis.GetConnectionString());
-        var instance = $"snapshot-{Guid.NewGuid():N}";
+        var kafka = new KafkaBuilder("confluentinc/cp-kafka:7.5.0").Build();
+        await using var kafkaLifetime = kafka;
+        await kafka.StartAsync();
+        var bootstrap = kafka.GetBootstrapAddress();
+        var topic = $"epex-{Guid.NewGuid():N}";
 
-        await using var publisher = await Pod.StartAsync(configuration, instance);
-        await using var reader = await Pod.StartAsync(configuration, instance);
+        using (var admin = new AdminClientBuilder(new AdminClientConfig { BootstrapServers = bootstrap }).Build())
+            await admin.CreateTopicsAsync([new TopicSpecification { Name = topic, NumPartitions = 3, ReplicationFactor = 1 }]);
 
-        publisher.Publish(Price("FR", 77m, "2026-10-13T12:00:00Z"));
-        await reader.WaitUntilCachedAsync("FR", 77m);
+        using var producer = new ProducerBuilder<Null, string>(new ProducerConfig { BootstrapServers = bootstrap }).Build();
+        var now = DateTimeOffset.UtcNow;
+        // Kafka time before the window: not replayed. Partition 2 stays empty and counts as caught up.
+        await Produce(producer, topic, 0, Price("AT", 9m, "2026-10-13T08:00:00Z"), now.AddHours(-2));
+        await Produce(producer, topic, 0, Price("DE", 41m, "2026-10-13T12:00:00Z"), now.AddMinutes(-1));
+        await Produce(producer, topic, 1, Price("FR", 42m, "2026-10-13T12:00:00Z"), now.AddMinutes(-1));
 
-        await using var client = await SnapshotClient.ConnectAsync(reader.Url);
-        await client.SubscribeAsync("FR");
+        await using var pod = await Pod.StartAsync(
+            "--Kafka:Enabled=true",
+            $"--Kafka:BootstrapServers={bootstrap}",
+            $"--Kafka:Topic={topic}",
+            "--Kafka:ReplayWindowSeconds=600");
+        await pod.WaitUntilReadyAsync(TimeSpan.FromSeconds(60));
 
-        var update = await client.NextAsync(TimeSpan.FromSeconds(5));
-        Assert.Equal("FR", update.Symbol);
-        Assert.Equal(77m, update.Price);
+        await pod.WaitUntilCachedAsync("DE", 41m);
+        await pod.WaitUntilCachedAsync("FR", 42m);
+        Assert.Empty(await pod.CachedAsync("AT"));
+
+        await using var client = await SnapshotClient.ConnectAsync(pod.Url);
+        await client.SubscribeAsync("DE");
+        Assert.Equal(41m, (await client.NextAsync(TimeSpan.FromSeconds(5))).Price);
+
+        // After replay, new messages are broadcast.
+        await Produce(producer, topic, 2, Price("DE", 43m, "2026-10-13T12:15:00Z"), DateTimeOffset.UtcNow);
+        Assert.Equal(43m, (await client.NextAsync(TimeSpan.FromSeconds(20))).Price);
     }
 
-    [Fact(Timeout = 180_000)]
-    public async Task Redis_cache_ignores_an_older_tick()
-    {
-        var redis = new RedisBuilder("redis:7-alpine").Build();
-        await using var redisLifetime = redis;
-        await redis.StartAsync();
-
-        using var multiplexer = await ConnectionMultiplexer.ConnectAsync(RedisConfiguration(redis.GetConnectionString()));
-        var cache = new RedisLastPriceCache(multiplexer, $"snapshot-{Guid.NewGuid():N}", NullLogger<RedisLastPriceCache>.Instance);
-
-        await cache.SetAsync("DE", Price("DE", 2m, "2026-10-13T12:00:00Z"));
-        await cache.SetAsync("DE", Price("DE", 1m, "2026-10-13T11:00:00Z"));
-        await multiplexer.GetDatabase().PingAsync();
-
-        var cached = Assert.Single(await cache.GetAsync(["DE"]));
-        Assert.Equal(2m, cached.Price);
-    }
+    private static Task Produce(IProducer<Null, string> producer, string topic, int partition, EpexMarketData price, DateTimeOffset kafkaTime) =>
+        producer.ProduceAsync(
+            new TopicPartition(topic, partition),
+            new Message<Null, string> { Value = JsonSerializer.Serialize(price), Timestamp = new Timestamp(kafkaTime) });
 
     private static EpexMarketData Price(string symbol, decimal price, string timestamp) => new()
     {
@@ -108,13 +112,6 @@ public sealed class SnapshotTests
         Unit = "EUR/MWh",
         Contract = "P60",
     };
-
-    private static string RedisConfiguration(string connectionString)
-    {
-        if (Uri.TryCreate(connectionString, UriKind.Absolute, out var uri) && uri.Port > 0)
-            return $"{uri.Host}:{uri.Port}";
-        return connectionString;
-    }
 
     private sealed class Pod : IAsyncDisposable
     {
@@ -128,23 +125,17 @@ public sealed class SnapshotTests
 
         public string Url { get; }
 
-        public static async Task<Pod> StartAsync(string? redisConfiguration = null, string? instanceName = null)
+        public static async Task<Pod> StartAsync(params string[] extraArgs)
         {
             Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", "Development");
-            var args = new List<string>
-            {
+            var app = Program.Create(
+            [
                 "--urls", "http://127.0.0.1:0",
                 "--Kafka:Enabled=false",
                 "--ShutdownTimeoutSeconds=5",
                 "--Logging:LogLevel:Default=Warning",
-            };
-            if (redisConfiguration is not null)
-            {
-                args.Add($"--Redis:Configuration={redisConfiguration}");
-                args.Add($"--Redis:InstanceName={instanceName}");
-            }
-
-            var app = Program.Create([.. args]);
+                .. extraArgs,
+            ]);
             await app.StartAsync();
             var url = app.Urls.First(address => address.StartsWith("http://", StringComparison.OrdinalIgnoreCase)).TrimEnd('/');
             return new Pod(app, url);
@@ -157,19 +148,35 @@ public sealed class SnapshotTests
                 throw new InvalidOperationException($"Pipeline dropped {price.Symbol}.");
         }
 
+        public Task<IReadOnlyList<EpexMarketData>> CachedAsync(string symbol) =>
+            _app.Services.GetRequiredService<ILastPriceCache>().GetAsync([symbol]);
+
         public async Task WaitUntilCachedAsync(string symbol, decimal price)
         {
-            var cache = _app.Services.GetRequiredService<ILastPriceCache>();
             var deadline = DateTime.UtcNow.AddSeconds(10);
             while (DateTime.UtcNow < deadline)
             {
-                var cached = await cache.GetAsync([symbol]);
-                if (cached.Any(value => value.Price == price))
+                if ((await CachedAsync(symbol)).Any(value => value.Price == price))
                     return;
                 await Task.Delay(50);
             }
 
             throw new TimeoutException($"{symbol} at {price} was not cached.");
+        }
+
+        public async Task WaitUntilReadyAsync(TimeSpan timeout)
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+            var deadline = DateTime.UtcNow + timeout;
+            while (DateTime.UtcNow < deadline)
+            {
+                var response = await http.GetAsync($"{Url}/health/ready");
+                if (response.StatusCode == HttpStatusCode.OK)
+                    return;
+                await Task.Delay(200);
+            }
+
+            throw new TimeoutException("Pod did not become ready.");
         }
 
         public async ValueTask DisposeAsync()

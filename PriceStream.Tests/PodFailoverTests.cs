@@ -11,14 +11,14 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using PriceStream.Models;
 using PriceStream.Services;
-using Testcontainers.Redis;
 using Xunit;
 
 namespace PriceStream.Tests;
 
 /// <summary>
 /// When the pod a client is stuck to goes down, the edge sends the reconnect to a healthy pod.
-/// The client resubscribes to the symbols it already asked for and keeps receiving them.
+/// The client resubscribes to the symbols it already asked for and keeps receiving them from the
+/// new pod, which reads the same topic.
 /// </summary>
 public sealed class PodFailoverTests
 {
@@ -29,20 +29,20 @@ public sealed class PodFailoverTests
     {
         Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", "Development");
 
-        var redis = new RedisBuilder("redis:7-alpine").Build();
-        await using var redisLifetime = redis;
-        await redis.StartAsync();
-
-        await using var fleet = await PodFleet.StartAsync(RedisConfiguration(redis.GetConnectionString()));
+        await using var fleet = await PodFleet.StartAsync();
         await using var edge = await StickyPodProxy.StartAsync(fleet.Pods);
         await using var client = await SubscribingClient.ConnectAsync(edge.Url);
 
         var connected = edge.CurrentPod;
         Assert.Contains(connected, fleet.Pods.Select(pod => pod.Name));
 
-        var publisher = fleet.Pods.First(pod => pod.Name != connected);
-        await client.ExpectAsync("DE", 101m, () => publisher.Publish("DE", 101m));
-        await client.ExpectAsync("FR", 102m, () => publisher.Publish("FR", 102m));
+        // Every pod reads the whole topic, so a tick reaches every running pod.
+        await client.ExpectAsync("DE", 101m, () => fleet.Publish("DE", 101m));
+        await client.ExpectAsync("FR", 102m, () => fleet.Publish("FR", 102m));
+
+        // No backplane: a tick on another pod alone does not reach this client.
+        var other = fleet.Pods.First(pod => pod.Name != connected);
+        await client.ExpectAbsentAsync("DE", 150m, () => other.Publish("DE", 150m));
 
         edge.RemovePod(connected);
         await fleet.Pods.Single(pod => pod.Name == connected).DisposeAsync();
@@ -52,17 +52,9 @@ public sealed class PodFailoverTests
         Assert.NotEqual(connected, landed);
         Assert.Contains(landed, fleet.Pods.Where(pod => pod.Name != connected).Select(pod => pod.Name));
 
-        var survivor = fleet.Pods.Single(pod => pod.Name != connected && pod.Name != landed);
-        await client.ExpectAsync("DE", 201m, () => survivor.Publish("DE", 201m));
-        await client.ExpectAsync("FR", 202m, () => survivor.Publish("FR", 202m));
-        await client.ExpectAbsentAsync("AT", 999m, () => survivor.Publish("AT", 999m));
-    }
-
-    private static string RedisConfiguration(string connectionString)
-    {
-        if (Uri.TryCreate(connectionString, UriKind.Absolute, out var uri) && uri.Port > 0)
-            return $"{uri.Host}:{uri.Port}";
-        return connectionString;
+        await client.ExpectAsync("DE", 201m, () => fleet.Publish("DE", 201m));
+        await client.ExpectAsync("FR", 202m, () => fleet.Publish("FR", 202m));
+        await client.ExpectAbsentAsync("AT", 999m, () => fleet.Publish("AT", 999m));
     }
 }
 
@@ -202,13 +194,20 @@ sealed class PodFleet : IAsyncDisposable
 
     public IReadOnlyList<PriceStreamPod> Pods { get; }
 
-    public static async Task<PodFleet> StartAsync(string redisConfiguration)
+    public static async Task<PodFleet> StartAsync()
     {
         var pods = await Task.WhenAll(
-            PriceStreamPod.StartAsync("pod-a", redisConfiguration),
-            PriceStreamPod.StartAsync("pod-b", redisConfiguration),
-            PriceStreamPod.StartAsync("pod-c", redisConfiguration));
+            PriceStreamPod.StartAsync("pod-a"),
+            PriceStreamPod.StartAsync("pod-b"),
+            PriceStreamPod.StartAsync("pod-c"));
         return new PodFleet(pods);
+    }
+
+    /// <summary>Stands in for the topic: every running pod receives the tick.</summary>
+    public void Publish(string symbol, decimal price)
+    {
+        foreach (var pod in Pods.Where(pod => pod.IsRunning))
+            pod.Publish(symbol, price);
     }
 
     public async ValueTask DisposeAsync()
@@ -232,15 +231,14 @@ sealed class PriceStreamPod : IAsyncDisposable
 
     public string Name { get; }
     public string Url { get; }
+    public bool IsRunning => Volatile.Read(ref _disposed) == 0;
 
-    public static async Task<PriceStreamPod> StartAsync(string name, string redisConfiguration)
+    public static async Task<PriceStreamPod> StartAsync(string name)
     {
         var app = Program.Create(
         [
             "--urls", "http://127.0.0.1:0",
             "--Kafka:Enabled=false",
-            $"--Redis:Configuration={redisConfiguration}",
-            "--Redis:InstanceName=pricestream-failover",
             "--ShutdownTimeoutSeconds=5",
             "--Logging:LogLevel:Default=Warning",
             "--Logging:LogLevel:Microsoft.AspNetCore=Warning",

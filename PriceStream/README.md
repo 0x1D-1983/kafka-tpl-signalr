@@ -4,18 +4,17 @@ EPEX market data flows from Kafka through a TPL Dataflow pipeline and is exposed
 
 ## Architecture
 
-- **Kafka**: Single topic (e.g. `epex-market-data`). Each pod runs a consumer in the **same consumer group** so partitions are distributed across pods (no single consumer).
-- **TPL Dataflow**: Parse JSON → broadcast to in-process subscribers. Backpressure via bounded capacity.
-- **SignalR**: Hub `PriceStreamHub` at `/hubs/pricestream`. Methods: `Subscribe(symbols)`, `Unsubscribe(symbols)`, both returning `{ accepted, rejected: [{ symbol, reason }] }`. Clients receive `PriceUpdate` with EPEX payload. With multiple pods, use the **Redis backplane** (see below) so a client subscribed to two symbols can receive both when each symbol is consumed by a different pod.
-- **Redis backplane** (optional): When `Redis:Configuration` is set, SignalR uses Redis to broadcast group messages across pods. Pod A may consume Kafka for symbol DE, Pod B for FR; with the backplane, a client connected to Pod A and subscribed to DE and FR still receives FR updates (from Pod B via Redis).
-- **Health**: `/health/live` (liveness), `/health/ready` (readiness: Kafka, and Redis when backplane is enabled). Use readiness for load balancer so traffic only goes to pods that can serve.
-
-- **Snapshot on subscribe**: Each tick is stored as the last price for its symbol. `Subscribe` sends the cached price as a `PriceUpdate` for each newly added symbol, so a client does not wait for the next tick. With Redis configured the cache is a Redis hash (`{InstanceName}:last-price`) shared by all pods. Without Redis it is in memory on the pod. An older source timestamp never replaces a newer one.
+- **Kafka**: Single topic (e.g. `epex-market-data`). **Every pod reads every partition** and sends only to its own connections, so no backplane is needed. Partitions are assigned manually (no consumer group membership, no commits), so scaling or restarting a pod never triggers a rebalance. The cost is that Kafka read bandwidth grows with the replica count.
+- **TPL Dataflow**: Parse JSON → bounded queue → per-symbol lanes that send to SignalR groups. Backpressure via bounded capacity.
+- **SignalR**: Hub `PriceStreamHub` at `/hubs/pricestream`. Methods: `Subscribe(symbols)`, `Unsubscribe(symbols)`, both returning `{ accepted, rejected: [{ symbol, reason }] }`. Clients receive `PriceUpdate` with EPEX payload.
+- **Health**: `/health/live` (liveness: process up, pipeline not faulted), `/health/ready` (readiness: Kafka reachable and startup replay finished). Use readiness for load balancer so traffic only goes to pods that can serve.
+- **Snapshot on subscribe**: Each tick is stored in memory as the last price for its symbol. `Subscribe` sends the cached price as a `PriceUpdate` for each newly added symbol, so a client does not wait for the next tick. An older source timestamp never replaces a newer one.
+- **Startup replay**: A new pod reads the last `ReplayWindowSeconds` of the topic into the cache without broadcasting, and stays unready until it reaches the offsets it had at startup. A client rerouted to it gets snapshots straight away.
 
 ## High availability
 
-- **Stateless pods**: No in-memory shared state. Subscriptions are per-connection; when a client reconnects (same or different pod), it must call `Subscribe(symbols)` again.
-- **Kafka consumer group**: Same `ConsumerGroupId` on all pods so the topic is partitioned across instances. No single point of failure for consumption.
+- **Stateless pods**: No shared state. Subscriptions are per-connection; when a client reconnects (same or different pod), it must call `Subscribe(symbols)` again.
+- **Kafka**: Each pod has every symbol, so losing a pod loses no data for the others. The `group.id` is `{ConsumerGroupId}-{pod name}` and only identifies the pod; nothing is committed.
 - **Load balancer**: Point liveness to `/health/live`, readiness to `/health/ready`. Sticky sessions keep negotiate and the WebSocket on the same pod. When that pod is gone, the next connection is routed to a healthy one.
 
 ## Client reconnection and resubscription
@@ -35,16 +34,15 @@ The **React client** (`PriceStreamClient/`) subscribes only to the symbols submi
 "Kafka": {
   "BootstrapServers": "localhost:9092",
   "Topic": "epex-market-data",
-  "ConsumerGroupId": "pricestream-signalr"
-},
-"Redis": {
-  "Configuration": "localhost:6379",
-  "InstanceName": "pricestream"
+  "ConsumerGroupId": "pricestream-signalr",
+  "ReplayWindowSeconds": 900,
+  "PartitionRefreshSeconds": 60
 }
 ```
 
 - **Kafka**: Required. Override in production (e.g. `Kafka__BootstrapServers`, `Kafka__Topic`, `Kafka__ConsumerGroupId`).
-- **Redis**: Optional. If `Redis:Configuration` is set, the SignalR Redis backplane is enabled so clients on one pod receive updates for symbols consumed on other pods. Use `InstanceName` to isolate multiple apps sharing the same Redis (channel prefix). Override with `Redis__Configuration`, `Redis__InstanceName`.
+  - `ReplayWindowSeconds` (default 900): how far back a starting pod reads into the last-price cache. `0` starts at the latest offset with an empty cache.
+  - `PartitionRefreshSeconds` (default 60): how often the topic is checked for added partitions, which are read from the beginning.
 
 - **Subscriptions**: Limits on client input to the hub.
   - `AllowedSymbols`: when non-empty, only these symbols are accepted (`not_allowed`).
@@ -73,13 +71,12 @@ JSON per message, matching `EpexMarketData`:
 
 ## Kubernetes
 
-Manifests under [`k8s/`](../k8s/) run three stateless replicas behind Envoy, with Redis as the SignalR backplane and a single-node Kafka broker. See the [root README](../README.md#kubernetes-kind--skaffold) for how to start the kind cluster.
+Manifests under [`k8s/`](../k8s/) run three stateless replicas behind Envoy and a single-node Kafka broker. See the [root README](../README.md#kubernetes-kind--skaffold) for how to start the kind cluster.
 
-- **Liveness probe**: `GET /health/live` → 200 = process is up. A crash restarts the container.
-- **Readiness probe**: `GET /health/ready` → 200 when Kafka and Redis are reachable. The Service and Envoy only send traffic to ready pods.
-- **Replicas**: 3, rolling update `maxUnavailable: 0` / `maxSurge: 1`, PodDisruptionBudget `minAvailable: 2`. A deploy brings a new pod up before taking an old one down.
-- **Same `ConsumerGroupId`** on every replica so partitions are shared. The broker auto-creates `epex-market-data` with 3 partitions.
-- **Redis**: `Redis__Configuration` is set in the Deployment, so group messages published on one pod reach clients connected to the others.
+- **Liveness probe**: `GET /health/live` → 200 = process is up and the pipeline has not faulted. A failure restarts the container.
+- **Readiness probe**: `GET /health/ready` → 200 when Kafka is reachable and the startup replay is done. The Service and Envoy only send traffic to ready pods.
+- **Replicas**: 3, rolling update `maxUnavailable: 0` / `maxSurge: 1`, PodDisruptionBudget `minAvailable: 2`. A deploy brings a new pod up, and lets it catch up, before taking an old one down.
+- **Every replica reads all partitions.** The broker auto-creates `epex-market-data` with 3 partitions; the count is independent of the replica count.
 
 ### When a pod dies
 
@@ -87,6 +84,6 @@ Manifests under [`k8s/`](../k8s/) run three stateless replicas behind Envoy, wit
 2. Readiness fails, so the pod leaves the headless Service. Envoy's health check (`/health/ready` every 2s, two failures) stops choosing it for new connections.
 3. Clients reconnect (`withAutomaticReconnect` in the React client) and call `Subscribe` again.
 4. The affinity cookie hashes to a remaining healthy pod.
-5. Whichever pod consumes a symbol publishes it through Redis, so the client keeps receiving updates.
+5. That pod already reads every symbol: `Subscribe` sends the cached prices, and live ticks follow.
 
 During a rolling deploy the same path runs one pod at a time, and at least two replicas stay available.
