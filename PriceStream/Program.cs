@@ -48,14 +48,30 @@ public partial class Program
         // can receive updates for symbols consumed by another pod.
         var signalrBuilder = services.AddSignalR();
         var redisConnection = configuration.GetValue<string>(RedisOptions.SectionName + ":Configuration");
+        var redisInstanceName = configuration.GetValue<string>(RedisOptions.SectionName + ":InstanceName");
         if (!string.IsNullOrWhiteSpace(redisConnection))
         {
             signalrBuilder.AddStackExchangeRedis(redisConnection, options =>
             {
-                var prefix = configuration.GetValue<string>(RedisOptions.SectionName + ":InstanceName");
-                if (!string.IsNullOrWhiteSpace(prefix))
-                    options.Configuration.ChannelPrefix = StackExchange.Redis.RedisChannel.Literal(prefix);
+                if (!string.IsNullOrWhiteSpace(redisInstanceName))
+                    options.Configuration.ChannelPrefix = StackExchange.Redis.RedisChannel.Literal(redisInstanceName);
             });
+
+            // Last-price snapshots live in Redis so a pod can serve symbols another pod consumes.
+            services.AddSingleton<StackExchange.Redis.IConnectionMultiplexer>(_ =>
+            {
+                var options = StackExchange.Redis.ConfigurationOptions.Parse(redisConnection);
+                options.AbortOnConnectFail = false;
+                return StackExchange.Redis.ConnectionMultiplexer.Connect(options);
+            });
+            services.AddSingleton<ILastPriceCache>(sp => new RedisLastPriceCache(
+                sp.GetRequiredService<StackExchange.Redis.IConnectionMultiplexer>(),
+                redisInstanceName,
+                sp.GetRequiredService<ILogger<RedisLastPriceCache>>()));
+        }
+        else
+        {
+            services.AddSingleton<ILastPriceCache, InMemoryLastPriceCache>();
         }
 
         // Liveness: process is up and the dataflow pipeline has not faulted (restart if it fails).

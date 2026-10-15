@@ -188,6 +188,8 @@ public sealed class PipelineFailureTests
         using var broadcaster = new SignalRPriceBroadcaster(
             new RecordingHubContext(proxy),
             pipeline,
+            new InMemoryLastPriceCache(),
+            new SubscriptionPolicy(Microsoft.Extensions.Options.Options.Create(new SubscriptionOptions())),
             NullLogger<SignalRPriceBroadcaster>.Instance);
 
         var symbols = new[] { "DE", "FR", "AT", "NL", "CH", "BE", "DK", "NO" };

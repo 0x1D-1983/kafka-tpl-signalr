@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.SignalR;
+using PriceStream.Services;
 
 namespace PriceStream.Hubs;
 
@@ -8,17 +9,20 @@ public sealed class PriceStreamHub : Hub
 
     private readonly ILogger<PriceStreamHub> _logger;
     private readonly SubscriptionPolicy _policy;
+    private readonly ILastPriceCache _lastPrices;
 
-    public PriceStreamHub(ILogger<PriceStreamHub> logger, SubscriptionPolicy policy)
+    public PriceStreamHub(ILogger<PriceStreamHub> logger, SubscriptionPolicy policy, ILastPriceCache lastPrices)
     {
         _logger = logger;
         _policy = policy;
+        _lastPrices = lastPrices;
     }
 
     /// <summary>
     /// Subscribe to one or more symbols. Each accepted symbol is added to this connection's subscription set.
     /// Call again after reconnect to restore subscriptions (connection state is not shared across pods).
     /// Symbols already subscribed are accepted without another group operation.
+    /// Newly added symbols with a cached price get it as a <c>PriceUpdate</c> right away.
     /// </summary>
     public async Task<SubscriptionResult> Subscribe(string[]? symbols)
     {
@@ -70,6 +74,10 @@ public sealed class PriceStreamHub : Hub
             subscriptions.ExceptWith(added);
             throw;
         }
+
+        // Read after joining the groups so no tick falls between snapshot and stream. A live tick can
+        // still reach the client before an older snapshot; clients drop ticks older than the latest seen.
+        await SendSnapshotAsync(added);
 
         _logger.LogDebug(
             "Connection {ConnectionId} subscribed to {Accepted}; rejected {RejectedCount}",
@@ -131,6 +139,27 @@ public sealed class PriceStreamHub : Hub
     }
 
     internal static string SymbolGroup(string symbol) => $"symbol:{symbol}";
+
+    private async Task SendSnapshotAsync(IReadOnlyCollection<string> symbols)
+    {
+        if (symbols.Count == 0)
+            return;
+
+        try
+        {
+            var snapshot = await _lastPrices.GetAsync(symbols);
+            foreach (var price in snapshot)
+                await Clients.Caller.SendAsync("PriceUpdate", price, Context.ConnectionAborted);
+        }
+        catch (OperationCanceledException) when (Context.ConnectionAborted.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            // The subscription stands; the client gets the next live tick.
+            _logger.LogWarning(ex, "Failed to send price snapshot to {ConnectionId}", Context.ConnectionId);
+        }
+    }
 
     // Not synchronized: SignalR runs one hub invocation per connection at a time
     // (MaximumParallelInvocationsPerClient defaults to 1).

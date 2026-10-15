@@ -10,6 +10,8 @@ EPEX market data flows from Kafka through a TPL Dataflow pipeline and is exposed
 - **Redis backplane** (optional): When `Redis:Configuration` is set, SignalR uses Redis to broadcast group messages across pods. Pod A may consume Kafka for symbol DE, Pod B for FR; with the backplane, a client connected to Pod A and subscribed to DE and FR still receives FR updates (from Pod B via Redis).
 - **Health**: `/health/live` (liveness), `/health/ready` (readiness: Kafka, and Redis when backplane is enabled). Use readiness for load balancer so traffic only goes to pods that can serve.
 
+- **Snapshot on subscribe**: Each tick is stored as the last price for its symbol. `Subscribe` sends the cached price as a `PriceUpdate` for each newly added symbol, so a client does not wait for the next tick. With Redis configured the cache is a Redis hash (`{InstanceName}:last-price`) shared by all pods. Without Redis it is in memory on the pod. An older source timestamp never replaces a newer one.
+
 ## High availability
 
 - **Stateless pods**: No in-memory shared state. Subscriptions are per-connection; when a client reconnects (same or different pod), it must call `Subscribe(symbols)` again.

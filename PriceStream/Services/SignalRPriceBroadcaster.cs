@@ -26,6 +26,8 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
 
     private readonly IHubContext<PriceStreamHub> _hubContext;
     private readonly EpexDataflowPipeline _pipeline;
+    private readonly ILastPriceCache _lastPrices;
+    private readonly SubscriptionPolicy _policy;
     private readonly ILogger<SignalRPriceBroadcaster> _logger;
     private readonly ActionBlock<EpexMarketData> _targetBlock;
     private readonly ActionBlock<EpexMarketData>[] _lanes;
@@ -35,10 +37,14 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
     public SignalRPriceBroadcaster(
         IHubContext<PriceStreamHub> hubContext,
         EpexDataflowPipeline pipeline,
+        ILastPriceCache lastPrices,
+        SubscriptionPolicy policy,
         ILogger<SignalRPriceBroadcaster> logger)
     {
         _hubContext = hubContext;
         _pipeline = pipeline;
+        _lastPrices = lastPrices;
+        _policy = policy;
         _logger = logger;
         _lanes = new ActionBlock<EpexMarketData>[LaneCount];
         for (var i = 0; i < _lanes.Length; i++)
@@ -195,7 +201,22 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
                 return;
             }
 
-            group = PriceStreamHub.SymbolGroup(symbol.ToUpperInvariant());
+            var normalized = symbol.Trim().ToUpperInvariant();
+            group = PriceStreamHub.SymbolGroup(normalized);
+
+            // Only symbols a client could subscribe to are cached, so Kafka cannot grow it past the allow-list.
+            if (_policy.Normalize(normalized, out _) is not null)
+            {
+                try
+                {
+                    await _lastPrices.SetAsync(normalized, message);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to cache last price for {Symbol}", normalized);
+                }
+            }
+
             await _hubContext.Clients.Group(group).SendAsync("PriceUpdate", message, CancellationToken.None);
         }
         catch (Exception ex)
