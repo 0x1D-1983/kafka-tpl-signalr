@@ -108,6 +108,24 @@ public sealed class PipelineFailureTests
         Assert.True(pipeline.Completion.IsCompletedSuccessfully);
     }
 
+    [Fact]
+    public async Task Null_symbol_does_not_fault_the_broadcaster()
+    {
+        await using var running = await RunningApp.StartAsync();
+        var pipeline = running.App.Services.GetRequiredService<EpexDataflowPipeline>();
+        var broadcaster = running.App.Services.GetRequiredService<SignalRPriceBroadcaster>();
+        var targetCompletion = Block(broadcaster, "_targetBlock").Completion;
+
+        Assert.True(pipeline.Post("""{"Symbol":null,"Market":"Day-Ahead","DeliveryArea":"DE","Timestamp":"2026-10-13T12:00:00Z","Price":1}"""));
+        Assert.True(pipeline.Post(SampleJson("DE", 42m)));
+
+        await running.App.StopAsync().WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.False(broadcaster.IsFaulted);
+        Assert.False(targetCompletion.IsFaulted, targetCompletion.Exception?.GetBaseException().ToString());
+        Assert.Equal(TaskStatus.RanToCompletion, targetCompletion.Status);
+    }
+
     private static async Task<HttpStatusCode> StatusAsync(HttpClient http, string url)
     {
         Exception? last = null;

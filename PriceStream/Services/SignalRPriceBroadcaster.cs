@@ -108,9 +108,19 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
 
     private async Task OnMessageAsync(EpexMarketData message)
     {
-        var group = PriceStreamHub.SymbolGroup(message.Symbol.ToUpperInvariant());
+        string? group = null;
         try
         {
+            // System.Text.Json leaves Symbol null when the JSON value is null. That must not
+            // escape this delegate: a thrown ActionBlock stays faulted and stops broadcasting.
+            var symbol = message.Symbol;
+            if (string.IsNullOrWhiteSpace(symbol))
+            {
+                _logger.LogWarning("Dropping price update with no symbol");
+                return;
+            }
+
+            group = PriceStreamHub.SymbolGroup(symbol.ToUpperInvariant());
             await _hubContext.Clients.Group(group).SendAsync("PriceUpdate", message, CancellationToken.None);
         }
         catch (Exception ex)
