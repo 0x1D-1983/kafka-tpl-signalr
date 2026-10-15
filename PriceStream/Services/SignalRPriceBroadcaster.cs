@@ -7,14 +7,22 @@ namespace PriceStream.Services;
 
 /// <summary>
 /// Consumes from the EPEX dataflow pipeline and broadcasts each message to SignalR groups by symbol.
+/// A faulted block fails this service so the host exits and Kubernetes restarts the pod.
+/// Shutdown completes the pipeline and drains queued broadcasts.
 /// </summary>
 public sealed class SignalRPriceBroadcaster : BackgroundService
 {
+    /// <summary>
+    /// How long shutdown waits for queued broadcasts to finish before dropping the rest.
+    /// Bounded by the host shutdown token when that fires sooner.
+    /// </summary>
+    private static readonly TimeSpan DrainTimeout = TimeSpan.FromSeconds(10);
+
     private readonly IHubContext<PriceStreamHub> _hubContext;
     private readonly EpexDataflowPipeline _pipeline;
     private readonly ILogger<SignalRPriceBroadcaster> _logger;
     private readonly ActionBlock<EpexMarketData> _targetBlock;
-    private IDisposable? _link;
+    private readonly IDisposable _link;
 
     public SignalRPriceBroadcaster(
         IHubContext<PriceStreamHub> hubContext,
@@ -31,25 +39,72 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
                 MaxDegreeOfParallelism = 4,
                 BoundedCapacity = 500
             });
+        // Linked up front so shutdown can propagate completion into this block even if ExecuteAsync has not started.
+        _link = _pipeline.LinkTo(_targetBlock);
+        ObserveFault(_targetBlock.Completion);
     }
+
+    /// <summary>
+    /// True when the SignalR action block has faulted. A faulted block does not recover.
+    /// </summary>
+    public bool IsFaulted => _targetBlock.Completion.IsFaulted;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _link = _pipeline.LinkTo(_targetBlock);
         try
         {
-            await Task.Delay(Timeout.Infinite, stoppingToken);
+            // A faulted completion throws here. The host stops, and Kubernetes restarts the pod.
+            await _targetBlock.Completion.WaitAsync(stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
         }
+        catch (Exception ex)
+        {
+            _logger.LogCritical(ex, "Price pipeline faulted; stopping the host so the pod restarts");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Completes the pipeline and waits for queued broadcasts to drain.
+    /// </summary>
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        _pipeline.Complete();
+
+        using var drain = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        drain.CancelAfter(DrainTimeout);
+        try
+        {
+            await _targetBlock.Completion.WaitAsync(drain.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "Price pipeline did not drain within {DrainTimeout}; remaining messages will be dropped",
+                DrainTimeout);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Price pipeline faulted while draining");
+        }
+
+        await base.StopAsync(cancellationToken);
     }
 
     public override void Dispose()
     {
-        _link?.Dispose();
+        _link.Dispose();
         base.Dispose();
     }
+
+    private static void ObserveFault(Task completion) =>
+        _ = completion.ContinueWith(
+            static completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
 
     private async Task OnMessageAsync(EpexMarketData message)
     {

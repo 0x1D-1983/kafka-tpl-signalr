@@ -23,11 +23,13 @@ public partial class Program
         services.Configure<RedisOptions>(configuration.GetSection(RedisOptions.SectionName));
 
         var shutdownSeconds = configuration.GetValue<int?>("ShutdownTimeoutSeconds");
-        if (shutdownSeconds is > 0)
+        services.Configure<HostOptions>(options =>
         {
-            services.Configure<HostOptions>(options =>
-                options.ShutdownTimeout = TimeSpan.FromSeconds(shutdownSeconds.Value));
-        }
+            // A faulted pipeline throws out of the broadcaster and stops the process.
+            options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.StopHost;
+            if (shutdownSeconds is > 0)
+                options.ShutdownTimeout = TimeSpan.FromSeconds(shutdownSeconds.Value);
+        });
 
         // Kafka → TPL Dataflow → SignalR pipeline (singleton pipeline, stateless for horizontal scaling)
         services.AddSingleton<EpexDataflowPipeline>();
@@ -36,7 +38,8 @@ public partial class Program
         {
             services.AddHostedService<KafkaEpexConsumerService>();
         }
-        services.AddHostedService<SignalRPriceBroadcaster>();
+        services.AddSingleton<SignalRPriceBroadcaster>();
+        services.AddHostedService(sp => sp.GetRequiredService<SignalRPriceBroadcaster>());
 
         // SignalR with optional Redis backplane: when multiple pods consume different Kafka partitions (symbols),
         // the backplane broadcasts group messages (e.g. symbol:DE, symbol:FR) to all pods so a client on one pod
@@ -53,10 +56,12 @@ public partial class Program
             });
         }
 
-        // Health checks for load balancer / Kubernetes: liveness = process alive, readiness = can serve traffic (Kafka + Redis when backplane enabled)
+        // Liveness: process is up and the dataflow pipeline has not faulted (restart if it fails).
+        // Readiness: can serve traffic (pipeline, Kafka, and Redis when the backplane is enabled).
         var healthChecks = services.AddHealthChecks()
-            .AddCheck("self", () => HealthCheckResult.Healthy(), tags: [ LiveTag ]);
-            
+            .AddCheck("self", () => HealthCheckResult.Healthy(), tags: [ LiveTag ])
+            .AddCheck<PipelineHealthCheck>("pipeline", tags: [ LiveTag, ReadyTag ]);
+
         if (kafkaEnabled)
         {
             healthChecks.AddCheck<KafkaHealthCheck>("kafka", tags: [ ReadyTag ]);
@@ -81,14 +86,14 @@ public partial class Program
         app.UseRouting();
         app.UseAuthorization();
 
-        // Liveness: pod is alive (restart if fails)
+        // Liveness: process is up and the pipeline has not faulted (restart if it fails)
         app.MapHealthChecks("/health/live", new HealthCheckOptions
         {
             Predicate = reg => reg.Tags.Contains(LiveTag),
             ResponseWriter = HealthResponseWriter.WriteMinimal
         }).AllowAnonymous();
 
-        // Readiness: pod can receive traffic (LB stops sending if not ready)
+        // Readiness: pod can receive traffic (pipeline, Kafka, Redis). LB stops sending if not ready.
         app.MapHealthChecks("/health/ready", new HealthCheckOptions
         {
             Predicate = reg => reg.Tags.Contains(ReadyTag),

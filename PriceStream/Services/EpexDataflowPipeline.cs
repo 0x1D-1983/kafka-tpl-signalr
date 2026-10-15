@@ -11,6 +11,7 @@ public sealed class EpexDataflowPipeline
 {
     private readonly TransformManyBlock<string, EpexMarketData> _parseBlock;
     private readonly BroadcastBlock<EpexMarketData> _broadcastBlock;
+    private int _completed;
 
     public EpexDataflowPipeline()
     {
@@ -25,6 +26,8 @@ public sealed class EpexDataflowPipeline
         _broadcastBlock = new BroadcastBlock<EpexMarketData>(m => m);
 
         _parseBlock.LinkTo(_broadcastBlock, new DataflowLinkOptions { PropagateCompletion = true });
+        ObserveFault(_parseBlock.Completion);
+        ObserveFault(_broadcastBlock.Completion);
     }
 
     /// <summary>
@@ -37,13 +40,58 @@ public sealed class EpexDataflowPipeline
 
     /// <summary>
     /// Subscribe to the pipeline to receive all parsed EPEX messages. Used by SignalR broadcaster.
+    /// Completion and faults propagate to <paramref name="target"/>.
     /// </summary>
     public IDisposable LinkTo(ITargetBlock<EpexMarketData> target)
     {
         return _broadcastBlock.LinkTo(target, new DataflowLinkOptions { PropagateCompletion = true });
     }
 
+    /// <summary>
+    /// Accepts no further messages. Blocks already queued are still processed, then completion
+    /// propagates to linked targets so they can drain.
+    /// </summary>
+    public void Complete()
+    {
+        if (Interlocked.Exchange(ref _completed, 1) != 0)
+            return;
+
+        try
+        {
+            _parseBlock.Complete();
+        }
+        catch (InvalidOperationException)
+        {
+            // Already completed or faulted.
+        }
+    }
+
+    /// <summary>
+    /// Names of pipeline blocks whose completion has faulted. Empty while the pipeline is running
+    /// or after a clean completion. A faulted block does not recover.
+    /// </summary>
+    public IReadOnlyList<string> FaultedBlocks
+    {
+        get
+        {
+            var parseFaulted = _parseBlock.Completion.IsFaulted;
+            var broadcastFaulted = _broadcastBlock.Completion.IsFaulted;
+            if (!parseFaulted && !broadcastFaulted)
+                return Array.Empty<string>();
+            if (parseFaulted && broadcastFaulted)
+                return ["parse", "broadcast"];
+            return parseFaulted ? ["parse"] : ["broadcast"];
+        }
+    }
+
     public Task Completion => _parseBlock.Completion;
+
+    private static void ObserveFault(Task completion) =>
+        _ = completion.ContinueWith(
+            static completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
 
     private static IEnumerable<EpexMarketData> ParseEpexMessages(string raw)
     {
