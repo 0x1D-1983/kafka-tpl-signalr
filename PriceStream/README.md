@@ -6,7 +6,7 @@ EPEX market data flows from Kafka through a TPL Dataflow pipeline and is exposed
 
 - **Kafka**: Single topic (e.g. `epex-market-data`). Each pod runs a consumer in the **same consumer group** so partitions are distributed across pods (no single consumer).
 - **TPL Dataflow**: Parse JSON → broadcast to in-process subscribers. Backpressure via bounded capacity.
-- **SignalR**: Hub `PriceStreamHub` at `/hubs/pricestream`. Methods: `Subscribe(symbols)`, `Unsubscribe(symbols)`. Clients receive `PriceUpdate` with EPEX payload. With multiple pods, use the **Redis backplane** (see below) so a client subscribed to two symbols can receive both when each symbol is consumed by a different pod.
+- **SignalR**: Hub `PriceStreamHub` at `/hubs/pricestream`. Methods: `Subscribe(symbols)`, `Unsubscribe(symbols)`, both returning `{ accepted, rejected: [{ symbol, reason }] }`. Clients receive `PriceUpdate` with EPEX payload. With multiple pods, use the **Redis backplane** (see below) so a client subscribed to two symbols can receive both when each symbol is consumed by a different pod.
 - **Redis backplane** (optional): When `Redis:Configuration` is set, SignalR uses Redis to broadcast group messages across pods. Pod A may consume Kafka for symbol DE, Pod B for FR; with the backplane, a client connected to Pod A and subscribed to DE and FR still receives FR updates (from Pod B via Redis).
 - **Health**: `/health/live` (liveness), `/health/ready` (readiness: Kafka, and Redis when backplane is enabled). Use readiness for load balancer so traffic only goes to pods that can serve.
 
@@ -43,6 +43,13 @@ The **React client** (`PriceStreamClient/`) subscribes only to the symbols submi
 
 - **Kafka**: Required. Override in production (e.g. `Kafka__BootstrapServers`, `Kafka__Topic`, `Kafka__ConsumerGroupId`).
 - **Redis**: Optional. If `Redis:Configuration` is set, the SignalR Redis backplane is enabled so clients on one pod receive updates for symbols consumed on other pods. Use `InstanceName` to isolate multiple apps sharing the same Redis (channel prefix). Override with `Redis__Configuration`, `Redis__InstanceName`.
+
+- **Subscriptions**: Limits on client input to the hub.
+  - `AllowedSymbols`: when non-empty, only these symbols are accepted (`not_allowed`).
+  - `SymbolPattern` and `MaxSymbolLength` (default 16): checked after trim and upper-casing (`invalid`).
+  - `MaxSymbolsPerConnection` (default 50): distinct symbols per connection (`limit_reached`).
+  - `CallsPerWindow` / `WindowSeconds` (default 10 per 10s): `Subscribe` and `Unsubscribe` share one per-connection token bucket (`rate_limited`).
+  - `Unsubscribe` rejects symbols the connection is not subscribed to (`not_subscribed`) without a group operation.
 
 ## Kafka message format
 

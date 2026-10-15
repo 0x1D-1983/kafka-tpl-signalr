@@ -21,6 +21,8 @@ public partial class Program
         // Configuration
         services.Configure<KafkaOptions>(configuration.GetSection(KafkaOptions.SectionName));
         services.Configure<RedisOptions>(configuration.GetSection(RedisOptions.SectionName));
+        services.Configure<SubscriptionOptions>(configuration.GetSection(SubscriptionOptions.SectionName));
+        services.AddSingleton<SubscriptionPolicy>();
 
         var shutdownSeconds = configuration.GetValue<int?>("ShutdownTimeoutSeconds");
         services.Configure<HostOptions>(options =>

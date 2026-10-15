@@ -22,7 +22,7 @@ function formatTime(ts) {
 
 export default function App() {
   const [symbolInput, setSymbolInput] = useState('DE, FR')
-  const { connectionState, updates, subscribedSymbols, subscribe } = usePriceStream()
+  const { connectionState, updates, subscribedSymbols, rejectedSymbols, subscribe } = usePriceStream()
 
   const handleSubscribe = (e) => {
     e.preventDefault()
@@ -58,6 +58,11 @@ export default function App() {
         </div>
         {subscribedSymbols.length > 0 && (
           <p className="subscribed">Subscribed: {subscribedSymbols.join(', ')}</p>
+        )}
+        {rejectedSymbols.length > 0 && (
+          <p className="rejected">
+            Rejected: {rejectedSymbols.map((r) => `${r.symbol} (${r.reason})`).join(', ')}
+          </p>
         )}
       </form>
 
