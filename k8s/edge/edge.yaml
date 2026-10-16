@@ -58,13 +58,15 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          # Memory grows with open WebSockets (two connections each); sized for the 10000 circuit
+          # breaker limit in envoy.yaml.
           resources:
             requests:
               cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 250m
               memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
           # The admin interface is bound to localhost, so probes check the listener socket.
           readinessProbe:
             tcpSocket:

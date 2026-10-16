@@ -45,14 +45,17 @@ public partial class Program
         services.AddSingleton<KafkaCatchUpState>();
         services.AddSingleton<KafkaConnectionState>();
         services.AddSingleton<PriceStreamMetrics>();
+        services.AddSingleton<PriceSubscribers>();
+        services.AddSingleton<SignalRPriceBroadcaster>();
+        services.AddHostedService(sp => sp.GetRequiredService<SignalRPriceBroadcaster>());
+        // Registered after the broadcaster: hosted services stop in reverse order, so the consumer stops
+        // posting before the broadcaster completes the pipeline. The other way round, every shutdown
+        // would count its last posts as backpressure drops.
         var kafkaEnabled = configuration.GetValue("Kafka:Enabled", true);
         if (kafkaEnabled)
         {
             services.AddHostedService<KafkaEpexConsumerService>();
         }
-        services.AddSingleton<PriceSubscribers>();
-        services.AddSingleton<SignalRPriceBroadcaster>();
-        services.AddHostedService(sp => sp.GetRequiredService<SignalRPriceBroadcaster>());
 
         services.AddSignalR();
 

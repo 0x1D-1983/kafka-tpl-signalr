@@ -5,6 +5,14 @@ admin:
   # Localhost only: stats and config dumps are not exposed outside the pod.
   address:
     socket_address: { address: 127.0.0.1, port_value: 9901 }
+# Upper bound on client connections across all listeners, a little above the upstream circuit breakers
+# so negotiate requests still get through when the WebSocket limit is reached.
+overload_manager:
+  resource_monitors:
+    - name: envoy.resource_monitors.global_downstream_max_connections
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
+        max_active_downstream_connections: 11000
 static_resources:
   listeners:
     - name: http
@@ -69,6 +77,16 @@ static_resources:
       dns_refresh_rate: 2s
       connect_timeout: 2s
       lb_policy: RING_HASH
+      # Each WebSocket holds one upstream HTTP/1.1 connection and one request for its lifetime. Envoy's
+      # default of 1024 for each would cap the whole cluster at about 1024 clients, whatever the replica
+      # count, and answer the rest with 503 (upstream_cx_overflow). Size together with the Envoy memory
+      # limit in edge.yaml and the downstream cap below.
+      circuit_breakers:
+        thresholds:
+          - priority: DEFAULT
+            max_connections: 10000
+            max_requests: 10000
+            max_pending_requests: 1000
       common_lb_config:
         # Never send traffic to unhealthy pods just because too few hosts are healthy.
         healthy_panic_threshold:

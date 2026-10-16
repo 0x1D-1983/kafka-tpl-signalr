@@ -18,6 +18,21 @@ namespace PriceStream.Tests;
 public sealed class PipelineFailureTests
 {
     [Fact]
+    public async Task Kafka_consumer_stops_before_the_broadcaster_completes_the_pipeline()
+    {
+        await using var app = Program.Create(["--Kafka:Enabled=true", "--urls", "http://127.0.0.1:0"]);
+
+        // The host stops hosted services in reverse order of this list.
+        var order = app.Services.GetServices<Microsoft.Extensions.Hosting.IHostedService>()
+            .Select(service => service.GetType())
+            .ToList();
+
+        Assert.True(
+            order.IndexOf(typeof(KafkaEpexConsumerService)) > order.IndexOf(typeof(SignalRPriceBroadcaster)),
+            $"Hosted services: {string.Join(", ", order.Select(type => type.Name))}");
+    }
+
+    [Fact]
     public async Task Complete_drains_linked_targets()
     {
         var pipeline = new EpexDataflowPipeline();
