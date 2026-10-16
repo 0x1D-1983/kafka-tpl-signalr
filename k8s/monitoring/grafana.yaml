@@ -51,6 +51,13 @@ spec:
               value: "false"
             - name: GF_NEWS_NEWS_FEED_ENABLED
               value: "false"
+            # Grafana 13 otherwise downloads and loads the Loki, traces, Pyroscope and drilldown apps
+            # (and an Elasticsearch backend) on every start; this dashboard only uses Prometheus.
+            - name: GF_PLUGINS_PREINSTALL_DISABLED
+              value: "true"
+            # Go does not see the cgroup limit; without this the heap grows until the kernel OOM-kills.
+            - name: GOMEMLIMIT
+              value: 800MiB
           ports:
             - name: http
               containerPort: 3000
@@ -76,10 +83,10 @@ spec:
           resources:
             requests:
               cpu: 50m
-              memory: 128Mi
+              memory: 256Mi
             limits:
               cpu: 500m
-              memory: 512Mi
+              memory: 1Gi
           readinessProbe:
             httpGet:
               path: /api/health
