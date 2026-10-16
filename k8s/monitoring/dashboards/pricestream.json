@@ -85,7 +85,7 @@
       "id": 4,
       "type": "stat",
       "title": "Publish latency p99",
-      "description": "Kafka message timestamp to SignalR group send completed. Includes clock skew between producer and pod.",
+      "description": "Kafka message timestamp to the send to one client completed, per delivered tick. Includes clock skew between producer and pod.",
       "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
@@ -151,13 +151,14 @@
       "id": 8,
       "type": "timeseries",
       "title": "Messages dropped by reason",
-      "description": "backpressure: pipeline queue full when the consumer posted. no_symbol: posted without a symbol. send_failed: SignalR group send threw.",
+      "description": "backpressure: pipeline queue full when the consumer posted. no_symbol: posted without a symbol. send_failed: a send to one client threw. superseded: a slow client's pending tick replaced by a newer one for the same symbol (that client skips a price, nobody else is affected).",
       "gridPos": { "x": 12, "y": 5, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 20, "drawStyle": "bars" } }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "refId": "A", "expr": "sum by (pod, reason) (rate(pricestream_messages_dropped_total{pod=~\"$pod\"}[$__rate_interval]))", "legendFormat": "{{pod}} {{reason}}" }
+        { "refId": "A", "expr": "sum by (pod, reason) (rate(pricestream_messages_dropped_total{pod=~\"$pod\"}[$__rate_interval]))", "legendFormat": "{{pod}} {{reason}}" },
+        { "refId": "B", "expr": "sum by (pod) (rate(pricestream_outbox_superseded_total{pod=~\"$pod\"}[$__rate_interval]))", "legendFormat": "{{pod}} superseded" }
       ]
     },
     { "id": 101, "type": "row", "title": "Pipeline", "collapsed": false, "gridPos": { "x": 0, "y": 13, "w": 24, "h": 1 }, "panels": [] },
@@ -165,7 +166,7 @@
       "id": 9,
       "type": "timeseries",
       "title": "Queue depth",
-      "description": "queue holds up to 1000 (then the consumer drops), router and each lane up to 500. A growing lane means slow sends for the symbols hashed to it.",
+      "description": "queue holds up to 1000 (then the consumer drops) and fanout up to 500; both should stay near 0. outboxes is the pending ticks across all client outboxes, at most one per symbol per client; a slow client grows it without blocking the others.",
       "gridPos": { "x": 0, "y": 14, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "custom": { "fillOpacity": 5 } }, "overrides": [] },

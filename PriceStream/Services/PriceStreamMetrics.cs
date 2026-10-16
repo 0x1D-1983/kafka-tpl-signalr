@@ -17,7 +17,8 @@ public sealed class PriceStreamMetrics
     private readonly Counter<long> _dropped;
     private readonly Histogram<double> _publishLatency;
     private readonly ConcurrentDictionary<string, Func<int>> _queues = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, int> _subscriptions = new(StringComparer.Ordinal);
+    private readonly Counter<long> _superseded;
+    private Func<IEnumerable<KeyValuePair<string, int>>> _subscriptions = static () => [];
     private readonly ConcurrentDictionary<(string Topic, int Partition), long> _consumerLag = new();
     // Unix seconds; 0 until the first message.
     private double _lastMessageTime;
@@ -38,10 +39,13 @@ public sealed class PriceStreamMetrics
         _dropped = meter.CreateCounter<long>(
             "pricestream.messages.dropped",
             description: "Parsed messages that were not delivered, by reason.");
+        _superseded = meter.CreateCounter<long>(
+            "pricestream.outbox.superseded",
+            description: "Ticks replaced by a newer tick for the same symbol before a slow client was sent them.");
         _publishLatency = meter.CreateHistogram(
             "pricestream.publish.latency",
             unit: "s",
-            description: "Kafka message timestamp to SignalR group send completed. Includes producer clock skew.",
+            description: "Kafka message timestamp to the send to one client completed, per delivered tick. Includes producer clock skew.",
             advice: new InstrumentAdvice<double>
             {
                 HistogramBucketBoundaries = [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
@@ -53,7 +57,7 @@ public sealed class PriceStreamMetrics
             description: "Messages waiting in each dataflow block.");
         meter.CreateObservableGauge(
             "pricestream.subscriptions",
-            () => _subscriptions.Select(s => new Measurement<int>(s.Value, new KeyValuePair<string, object?>("symbol", s.Key))),
+            () => _subscriptions().Select(s => new Measurement<int>(s.Value, new KeyValuePair<string, object?>("symbol", s.Key))),
             description: "Connections on this pod subscribed to each symbol.");
         meter.CreateObservableGauge(
             "pricestream.kafka.consumer_lag",
@@ -91,21 +95,11 @@ public sealed class PriceStreamMetrics
 
     public void SetConsumerLag(string topic, int partition, long lag) => _consumerLag[(topic, partition)] = lag;
 
-    public void SubscriptionAdded(string symbol) =>
-        _subscriptions.AddOrUpdate(symbol, 1, static (_, count) => count + 1);
+    /// <summary>Subscribers per symbol; symbols without subscribers should not be reported.</summary>
+    public void ObserveSubscriptions(Func<IEnumerable<KeyValuePair<string, int>>> subscriptions) =>
+        _subscriptions = subscriptions;
 
-    /// <summary>Symbols drop out of the gauge at zero, so the series count follows live subscriptions.</summary>
-    public void SubscriptionRemoved(string symbol)
-    {
-        while (_subscriptions.TryGetValue(symbol, out var count))
-        {
-            var done = count <= 1
-                ? _subscriptions.TryRemove(new KeyValuePair<string, int>(symbol, count))
-                : _subscriptions.TryUpdate(symbol, count - 1, count);
-            if (done)
-                return;
-        }
-    }
+    public void TickSuperseded() => _superseded.Add(1);
 }
 
 public static class DropReason

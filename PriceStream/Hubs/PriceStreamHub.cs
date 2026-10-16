@@ -10,24 +10,24 @@ public sealed class PriceStreamHub : Hub<IPriceClient>
     private readonly ILogger<PriceStreamHub> _logger;
     private readonly SubscriptionPolicy _policy;
     private readonly ILastPriceCache _lastPrices;
-    private readonly PriceStreamMetrics _metrics;
+    private readonly PriceSubscribers _subscribers;
 
     public PriceStreamHub(
         ILogger<PriceStreamHub> logger,
         SubscriptionPolicy policy,
         ILastPriceCache lastPrices,
-        PriceStreamMetrics metrics)
+        PriceSubscribers subscribers)
     {
         _logger = logger;
         _policy = policy;
         _lastPrices = lastPrices;
-        _metrics = metrics;
+        _subscribers = subscribers;
     }
 
     /// <summary>
     /// Subscribe to one or more symbols. Each accepted symbol is added to this connection's subscription set.
     /// Call again after reconnect to restore subscriptions (connection state is not shared across pods).
-    /// Symbols already subscribed are accepted without another group operation.
+    /// Symbols already subscribed are accepted again without another snapshot.
     /// Newly added symbols with a cached price get it as a <c>PriceUpdate</c> right away.
     /// </summary>
     public async Task<SubscriptionResult> Subscribe(string[]? symbols)
@@ -70,23 +70,12 @@ public sealed class PriceStreamHub : Hub<IPriceClient>
             added.Add(symbol);
         }
 
-        try
-        {
-            await Task.WhenAll(added.Select(symbol =>
-                Groups.AddToGroupAsync(Context.ConnectionId, SymbolGroup(symbol), Context.ConnectionAborted)));
-        }
-        catch
-        {
-            subscriptions.ExceptWith(added);
-            throw;
-        }
-
         foreach (var symbol in added)
-            _metrics.SubscriptionAdded(symbol);
+            _subscribers.Subscribe(Context.ConnectionId, symbol);
 
-        // Read after joining the groups so no tick falls between snapshot and stream. A live tick can
-        // still reach the client before an older snapshot; clients drop ticks older than the latest seen.
-        await SendSnapshotAsync(added);
+        // Read after subscribing so no tick falls between snapshot and stream. The snapshot goes through
+        // the same outbox as live ticks, so it never overtakes a newer one.
+        await QueueSnapshotAsync(added);
 
         _logger.LogDebug(
             "Connection {ConnectionId} subscribed to {Accepted}; rejected {RejectedCount}",
@@ -95,10 +84,10 @@ public sealed class PriceStreamHub : Hub<IPriceClient>
     }
 
     /// <summary>
-    /// Unsubscribe from the given symbols. Symbols this connection is not subscribed to are rejected
-    /// without a group operation.
+    /// Unsubscribe from the given symbols. Symbols this connection is not subscribed to are rejected.
+    /// A tick already queued for a removed symbol may still arrive.
     /// </summary>
-    public async Task<SubscriptionResult> Unsubscribe(string[]? symbols)
+    public SubscriptionResult Unsubscribe(string[]? symbols)
     {
         symbols ??= [];
         if (!_policy.TryAcquireCall(Context.ConnectionId))
@@ -127,45 +116,35 @@ public sealed class PriceStreamHub : Hub<IPriceClient>
             }
 
             removed.Add(symbol);
-            _metrics.SubscriptionRemoved(symbol);
+            _subscribers.Unsubscribe(Context.ConnectionId, symbol);
         }
-
-        await Task.WhenAll(removed.Select(symbol =>
-            Groups.RemoveFromGroupAsync(Context.ConnectionId, SymbolGroup(symbol), Context.ConnectionAborted)));
 
         return new SubscriptionResult(removed, rejected);
     }
 
     public override Task OnConnectedAsync()
     {
+        _subscribers.Connect(Context.ConnectionId);
         _logger.LogInformation("Client connected: {ConnectionId}", Context.ConnectionId);
         return Task.CompletedTask;
     }
 
     public override Task OnDisconnectedAsync(Exception? exception)
     {
+        _subscribers.Disconnect(Context.ConnectionId);
         _logger.LogInformation("Client disconnected: {ConnectionId}, Reason: {Reason}", Context.ConnectionId, exception?.Message ?? "normal");
-        // SignalR removes the connection from its groups; only the gauge needs updating.
-        foreach (var symbol in Subscriptions())
-            _metrics.SubscriptionRemoved(symbol);
         return Task.CompletedTask;
     }
 
-    internal static string SymbolGroup(string symbol) => $"symbol:{symbol}";
-
-    private async Task SendSnapshotAsync(IReadOnlyCollection<string> symbols)
+    private async Task QueueSnapshotAsync(IReadOnlyCollection<string> symbols)
     {
         if (symbols.Count == 0)
             return;
 
         try
         {
-            var snapshot = await _lastPrices.GetAsync(symbols);
-            foreach (var price in snapshot)
-                await Clients.Caller.PriceUpdate(price);
-        }
-        catch (OperationCanceledException) when (Context.ConnectionAborted.IsCancellationRequested)
-        {
+            foreach (var price in await _lastPrices.GetAsync(symbols))
+                _subscribers.SendSnapshot(Context.ConnectionId, new PriceTick(price, KafkaTimestamp: null));
         }
         catch (Exception ex)
         {

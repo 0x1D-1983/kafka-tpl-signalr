@@ -6,7 +6,8 @@ EPEX market data flows from Kafka through a TPL Dataflow pipeline and is exposed
 
 - **Kafka**: Single topic (e.g. `epex-market-data`). **Every pod reads every partition** and sends only to its own connections, so no backplane is needed. Partitions are assigned manually (no consumer group membership, no commits), so scaling or restarting a pod never triggers a rebalance. The cost is that Kafka read bandwidth grows with the replica count.
 - **Parsing**: The Kafka value deserializer parses JSON straight from librdkafka's buffer (`ReadOnlySpan<byte>`, source-generated `JsonSerializerContext`), with no intermediate `byte[]` or `string`. Symbols are trimmed and upper-cased there; payloads that are not valid or have no symbol are skipped.
-- **TPL Dataflow**: bounded queue → per-symbol lanes that send to SignalR groups. Backpressure via bounded capacity.
+- **TPL Dataflow**: bounded queue → one fan-out block that caches the tick and hands it to each subscriber's outbox. Backpressure via bounded capacity.
+- **Per-connection outbox** (`PriceSubscribers`): each connection keeps at most one pending tick per symbol and has its own sender. SignalR groups are not used, because a group send completes only when every member's write does, so one client that stops reading would stall the pipeline for everyone. A slow client instead skips to the latest price per symbol, and a send stuck longer than `SignalR:TransportSendTimeoutSeconds` (default 3) closes its connection. `SlowClientTests` checks this under load.
 - **SignalR**: Hub `PriceStreamHub` at `/hubs/pricestream`. Methods: `Subscribe(symbols)`, `Unsubscribe(symbols)`, both returning `{ accepted, rejected: [{ symbol, reason }] }`. Clients receive `PriceUpdate` with EPEX payload.
 - **Health**: `/health/live` (liveness: process up, pipeline not faulted), `/health/ready` (readiness: pipeline not faulted and startup replay finished), `/health/kafka` (diagnostic: broker connectivity as seen by the consumer, JSON, 503 while degraded). Use readiness for load balancer so traffic only goes to pods that can serve.
 - **Snapshot on subscribe**: Each tick is stored in memory as the last price for its symbol. `Subscribe` sends the cached price as a `PriceUpdate` for each newly added symbol, so a client does not wait for the next tick. An older source timestamp never replaces a newer one.
@@ -50,7 +51,7 @@ The **React client** (`PriceStreamClient/`) subscribes only to the symbols submi
   - `SymbolPattern` and `MaxSymbolLength` (default 16): checked after trim and upper-casing (`invalid`).
   - `MaxSymbolsPerConnection` (default 50): distinct symbols per connection (`limit_reached`).
   - `CallsPerWindow` / `WindowSeconds` (default 10 per 10s): `Subscribe` and `Unsubscribe` share one per-connection token bucket (`rate_limited`).
-  - `Unsubscribe` rejects symbols the connection is not subscribed to (`not_subscribed`) without a group operation.
+  - `Unsubscribe` rejects symbols the connection is not subscribed to (`not_subscribed`).
 
 ## Kafka message format
 
@@ -80,8 +81,9 @@ Manifests under [`k8s/`](../k8s/) run three stateless replicas behind Envoy and 
 - **Metrics**: `GET /metrics` (Prometheus format, not routed by the edge), from `PriceStreamMetrics` plus the ASP.NET Core hosting and SignalR connection meters (`signalr_server_active_connections`):
   - `pricestream_kafka_messages_total`, `…_parsed_total`, `…_failed_total`: messages received (including replay), and whether they parsed.
   - `pricestream_messages_dropped_total{reason}`: `backpressure` (pipeline queue full), `no_symbol`, `send_failed`.
-  - `pricestream_pipeline_queue_depth{stage}`: `queue`, `router`, `lane-0`…`lane-3`.
-  - `pricestream_publish_latency_seconds`: histogram from the Kafka message timestamp to the SignalR group send completing, live messages only. It includes producer `linger.ms` and clock skew, because the record timestamp is set before the producer batches.
+  - `pricestream_pipeline_queue_depth{stage}`: `queue`, `fanout`, and `outboxes` (pending ticks across all client outboxes).
+  - `pricestream_outbox_superseded_total`: pending ticks replaced by a newer one for the same symbol before a slow client took them.
+  - `pricestream_publish_latency_seconds`: histogram from the Kafka message timestamp to the send to one client completing, per delivered tick, live messages only. It includes producer `linger.ms` and clock skew, because the record timestamp is set before the producer batches.
   - `pricestream_subscriptions{symbol}`: connections on this pod per symbol; a symbol drops out at zero.
   - `pricestream_kafka_consumer_lag{topic,partition}`: high watermark minus position, updated every 5s from the consumer's last fetch.
   - `pricestream_kafka_last_message_time_seconds` (0 before the first message) and `pricestream_kafka_connected`.

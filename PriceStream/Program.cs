@@ -48,6 +48,7 @@ public partial class Program
         {
             services.AddHostedService<KafkaEpexConsumerService>();
         }
+        services.AddSingleton<PriceSubscribers>();
         services.AddSingleton<SignalRPriceBroadcaster>();
         services.AddHostedService(sp => sp.GetRequiredService<SignalRPriceBroadcaster>());
 
@@ -146,7 +147,10 @@ public partial class Program
 
         app.MapPrometheusScrapingEndpoint();
 
-        app.MapHub<PriceStreamHub>("/hubs/pricestream");
+        // A client that stops reading only delays its own outbox, but holds that outbox's sender until
+        // this fires and SignalR closes the connection (the client reconnects and gets snapshots).
+        var transportSendTimeout = TimeSpan.FromSeconds(configuration.GetValue("SignalR:TransportSendTimeoutSeconds", 3));
+        app.MapHub<PriceStreamHub>("/hubs/pricestream", options => options.TransportSendTimeout = transportSendTimeout);
 
         return app;
     }

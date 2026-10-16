@@ -181,33 +181,67 @@ public sealed class PipelineFailureTests
     }
 
     [Fact]
-    public async Task Same_symbol_is_sent_one_at_a_time_while_other_symbols_overlap()
+    public async Task Busy_client_gets_only_the_latest_tick_per_symbol()
     {
-        var pipeline = new EpexDataflowPipeline();
-        var proxy = new RecordingProxy();
-        using var broadcaster = new SignalRPriceBroadcaster(
-            new RecordingHubContext(proxy),
-            pipeline,
-            new InMemoryLastPriceCache(),
-            new SubscriptionPolicy(Microsoft.Extensions.Options.Options.Create(new SubscriptionOptions())),
-            new PriceStreamMetrics(
-                new ServiceCollection().AddMetrics().BuildServiceProvider().GetRequiredService<System.Diagnostics.Metrics.IMeterFactory>(),
-                new KafkaConnectionState()),
-            NullLogger<SignalRPriceBroadcaster>.Instance);
+        var client = new GatedClient();
+        using var metrics = new ServiceCollection().AddMetrics().BuildServiceProvider();
+        var subscribers = Subscribers(client, metrics);
+        subscribers.Connect("c1");
+        subscribers.Subscribe("c1", "DE");
+        subscribers.Subscribe("c1", "FR");
 
-        var symbols = new[] { "DE", "FR", "AT", "NL", "CH", "BE", "DK", "NO" };
-        foreach (var symbol in symbols)
-        {
-            for (var price = 1; price <= 3; price++)
-                Assert.True(pipeline.Post(Sample(symbol, price)));
-        }
+        subscribers.Publish(Tick("DE", 1, "12:00"));
+        await client.FirstSendStarted.WaitAsync(TimeSpan.FromSeconds(2));
+        subscribers.Publish(Tick("DE", 2, "12:01"));
+        subscribers.Publish(Tick("FR", 1, "12:01"));
+        subscribers.Publish(Tick("DE", 3, "12:02"));
+        client.Release();
 
-        await broadcaster.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
-
-        foreach (var symbol in symbols)
-            Assert.Equal(1, proxy.MaxInFlight(symbol));
-        Assert.True(proxy.MaxInFlightOverall > 1, "Expected different symbols to send in parallel.");
+        await client.WaitForAsync(3, TimeSpan.FromSeconds(2));
+        Assert.Equal(["DE 1", "DE 3", "FR 1"], client.Received.Take(1).Concat(client.Received.Skip(1).Order()));
     }
+
+    [Fact]
+    public async Task Older_snapshot_does_not_replace_a_queued_newer_tick()
+    {
+        var client = new GatedClient();
+        using var metrics = new ServiceCollection().AddMetrics().BuildServiceProvider();
+        var subscribers = Subscribers(client, metrics);
+        subscribers.Connect("c1");
+        subscribers.Subscribe("c1", "DE");
+        subscribers.Subscribe("c1", "FR");
+
+        subscribers.Publish(Tick("FR", 1, "12:00"));
+        await client.FirstSendStarted.WaitAsync(TimeSpan.FromSeconds(2));
+        subscribers.Publish(Tick("DE", 2, "12:05"));
+        subscribers.SendSnapshot("c1", Tick("DE", 1, "12:00"));
+        client.Release();
+
+        await client.WaitForAsync(2, TimeSpan.FromSeconds(2));
+        await Task.Delay(100);
+        Assert.Equal(["FR 1", "DE 2"], client.Received);
+    }
+
+    // Dispose the provider: OpenTelemetry in other test hosts would otherwise export these instruments.
+    private static PriceSubscribers Subscribers(IPriceClient client, IServiceProvider metrics) =>
+        new(
+            new SingleClientHubContext(client),
+            new PriceStreamMetrics(
+                metrics.GetRequiredService<System.Diagnostics.Metrics.IMeterFactory>(),
+                new KafkaConnectionState()),
+            NullLogger<ClientOutbox>.Instance);
+
+    private static PriceTick Tick(string symbol, decimal price, string time) =>
+        new(new EpexMarketData
+        {
+            Symbol = symbol,
+            Market = "Day-Ahead",
+            DeliveryArea = symbol,
+            Timestamp = DateTimeOffset.Parse($"2026-10-13T{time}:00Z"),
+            Price = price,
+            Unit = "EUR/MWh",
+            Contract = "P60",
+        }, null);
 
     private static async Task<HttpStatusCode> StatusAsync(HttpClient http, string url)
     {
@@ -294,67 +328,56 @@ public sealed class PipelineFailureTests
     }
 }
 
-sealed class RecordingHubContext : IHubContext<PriceStreamHub, IPriceClient>
+sealed class SingleClientHubContext(IPriceClient client) : IHubContext<PriceStreamHub, IPriceClient>
 {
-    public RecordingHubContext(RecordingProxy proxy) => Clients = new RecordingClients(proxy);
-
-    public IHubClients<IPriceClient> Clients { get; }
+    public IHubClients<IPriceClient> Clients { get; } = new SingleClientClients(client);
     public IGroupManager Groups => throw new NotSupportedException();
 }
 
-sealed class RecordingClients : IHubClients<IPriceClient>
+sealed class SingleClientClients(IPriceClient client) : IHubClients<IPriceClient>
 {
-    private readonly RecordingProxy _proxy;
-
-    public RecordingClients(RecordingProxy proxy) => _proxy = proxy;
-
-    public IPriceClient Group(string groupName) => _proxy;
+    public IPriceClient Client(string connectionId) => client;
     public IPriceClient All => throw new NotSupportedException();
     public IPriceClient AllExcept(IReadOnlyList<string> excludedConnectionIds) => throw new NotSupportedException();
-    public IPriceClient Client(string connectionId) => throw new NotSupportedException();
     public IPriceClient Clients(IReadOnlyList<string> connectionIds) => throw new NotSupportedException();
+    public IPriceClient Group(string groupName) => throw new NotSupportedException();
     public IPriceClient GroupExcept(string groupName, IReadOnlyList<string> excludedConnectionIds) => throw new NotSupportedException();
     public IPriceClient Groups(IReadOnlyList<string> groupNames) => throw new NotSupportedException();
     public IPriceClient User(string userId) => throw new NotSupportedException();
     public IPriceClient Users(IReadOnlyList<string> userIds) => throw new NotSupportedException();
 }
 
-sealed class RecordingProxy : IPriceClient
+/// <summary>The first send waits for <see cref="Release"/>, like a client whose socket is full.</summary>
+sealed class GatedClient : IPriceClient
 {
-    private readonly object _gate = new();
-    private readonly Dictionary<string, int> _inFlight = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, int> _maxInFlight = new(StringComparer.OrdinalIgnoreCase);
-    private int _overall;
-    private int _maxOverall;
+    private readonly TaskCompletionSource _firstSendStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly List<string> _received = [];
 
-    public int MaxInFlightOverall
+    public Task FirstSendStarted => _firstSendStarted.Task;
+
+    public IReadOnlyList<string> Received
     {
-        get { lock (_gate) return _maxOverall; }
+        get { lock (_received) return _received.ToArray(); }
     }
 
-    public int MaxInFlight(string symbol)
+    public void Release() => _release.TrySetResult();
+
+    public async Task PriceUpdate(EpexMarketData update)
     {
-        lock (_gate) return _maxInFlight.GetValueOrDefault(symbol);
+        _firstSendStarted.TrySetResult();
+        await _release.Task;
+        lock (_received) _received.Add($"{update.Symbol} {update.Price:0}");
     }
 
-    public async Task PriceUpdate(EpexMarketData message)
+    public async Task WaitForAsync(int count, TimeSpan timeout)
     {
-        var symbol = message.Symbol;
-        lock (_gate)
+        var deadline = DateTime.UtcNow + timeout;
+        while (Received.Count < count)
         {
-            var inFlight = _inFlight.GetValueOrDefault(symbol) + 1;
-            _inFlight[symbol] = inFlight;
-            _maxInFlight[symbol] = Math.Max(_maxInFlight.GetValueOrDefault(symbol), inFlight);
-            _overall++;
-            _maxOverall = Math.Max(_maxOverall, _overall);
-        }
-
-        await Task.Delay(40);
-
-        lock (_gate)
-        {
-            _inFlight[symbol]--;
-            _overall--;
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException($"Received {Received.Count} of {count}: {string.Join(", ", Received)}");
+            await Task.Delay(10);
         }
     }
 }

@@ -15,6 +15,7 @@ using Xunit;
 
 namespace PriceStream.Tests;
 
+[Collection(MetricsCollection.Name)]
 public sealed class SnapshotTests
 {
     [Fact]
@@ -251,11 +252,12 @@ public sealed class SnapshotTests
         public async Task WaitUntilMetricGoneAsync(string name, string label, TimeSpan timeout)
         {
             var deadline = DateTime.UtcNow + timeout;
+            var value = double.NaN;
             while (DateTime.UtcNow < deadline)
             {
                 try
                 {
-                    await MetricAsync(name, label);
+                    value = await MetricAsync(name, label);
                 }
                 catch (InvalidOperationException)
                 {
@@ -265,7 +267,7 @@ public sealed class SnapshotTests
                 await Task.Delay(200);
             }
 
-            throw new TimeoutException($"{name}{{{label}}} is still reported.");
+            throw new TimeoutException($"{name}{{{label}}} is still reported ({value}).");
         }
 
         public async Task WaitForMetricAsync(string name, string label, double expected, TimeSpan timeout)
