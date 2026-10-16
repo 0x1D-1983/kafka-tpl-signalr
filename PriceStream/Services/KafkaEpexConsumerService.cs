@@ -275,7 +275,7 @@ public sealed class KafkaEpexConsumerService : BackgroundService
 
         try
         {
-            await _lastPrices.SetAsync(message.Symbol, message);
+            await _lastPrices.SetAsync(message);
         }
         catch (Exception ex)
         {

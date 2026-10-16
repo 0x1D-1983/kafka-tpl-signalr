@@ -28,7 +28,8 @@ public sealed class PriceStreamHub : Hub<IPriceClient>
     /// Subscribe to one or more symbols. Each accepted symbol is added to this connection's subscription set.
     /// Call again after reconnect to restore subscriptions (connection state is not shared across pods).
     /// Symbols already subscribed are accepted again without another snapshot.
-    /// Newly added symbols with a cached price get it as a <c>PriceUpdate</c> right away.
+    /// Newly added symbols get one <c>PriceUpdate</c> per cached instrument (market, delivery area,
+    /// contract) right away, oldest first.
     /// </summary>
     public async Task<SubscriptionResult> Subscribe(string[]? symbols)
     {

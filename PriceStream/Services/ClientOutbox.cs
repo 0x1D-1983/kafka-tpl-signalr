@@ -1,12 +1,14 @@
 using System.Threading.Channels;
 using PriceStream.Hubs;
+using PriceStream.Models;
 
 namespace PriceStream.Services;
 
 /// <summary>
-/// Pending ticks for one connection, at most one per symbol, sent by a single loop. While the client
-/// is slow a newer tick replaces the queued one, so it falls behind only on its own prices and memory
-/// stays bounded by its subscription count. A client that stops reading is disconnected by SignalR's
+/// Pending ticks for one connection, at most one per instrument, sent by a single loop. While the
+/// client is slow a newer tick replaces the queued one for the same instrument, so it falls behind only
+/// on its own prices, never loses another contract's price, and memory stays bounded by the instruments
+/// of its subscribed symbols. A client that stops reading is disconnected by SignalR's
 /// transport send timeout.
 /// </summary>
 public sealed class ClientOutbox
@@ -15,7 +17,7 @@ public sealed class ClientOutbox
     private readonly PriceStreamMetrics _metrics;
     private readonly ILogger<ClientOutbox> _logger;
     private readonly string _connectionId;
-    private readonly Dictionary<string, PriceTick> _pending = new(StringComparer.Ordinal);
+    private readonly Dictionary<InstrumentKey, PriceTick> _pending = new();
     private readonly Lock _gate = new();
     private readonly Channel<bool> _signal = Channel.CreateBounded<bool>(
         new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite, SingleReader = true });
@@ -39,7 +41,8 @@ public sealed class ClientOutbox
     {
         lock (_gate)
         {
-            if (_pending.TryGetValue(tick.Data.Symbol, out var queued))
+            var key = InstrumentKey.Of(tick.Data);
+            if (_pending.TryGetValue(key, out var queued))
             {
                 _metrics.TickSuperseded();
                 // A snapshot read from the cache can be older than a live tick already queued.
@@ -47,7 +50,7 @@ public sealed class ClientOutbox
                     return;
             }
 
-            _pending[tick.Data.Symbol] = tick;
+            _pending[key] = tick;
         }
 
         _signal.Writer.TryWrite(true);

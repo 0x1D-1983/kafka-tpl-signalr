@@ -139,7 +139,7 @@ public sealed class SignalRPriceBroadcaster : BackgroundService
             {
                 try
                 {
-                    await _lastPrices.SetAsync(symbol, message);
+                    await _lastPrices.SetAsync(message);
                 }
                 catch (Exception ex)
                 {

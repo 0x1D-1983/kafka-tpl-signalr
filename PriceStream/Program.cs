@@ -39,7 +39,9 @@ public partial class Program
         // Kafka → TPL Dataflow → SignalR. Every pod reads the whole topic and sends only to its own
         // connections, so there is no backplane and the last-price cache can be local.
         services.AddSingleton<EpexDataflowPipeline>();
-        services.AddSingleton<ILastPriceCache, InMemoryLastPriceCache>();
+        var lastPriceRetention = TimeSpan.FromHours(
+            configuration.GetValue("LastPrice:RetentionHours", InMemoryLastPriceCache.DefaultRetention.TotalHours));
+        services.AddSingleton<ILastPriceCache>(new InMemoryLastPriceCache(lastPriceRetention, TimeProvider.System));
         services.AddSingleton<KafkaCatchUpState>();
         services.AddSingleton<KafkaConnectionState>();
         services.AddSingleton<PriceStreamMetrics>();

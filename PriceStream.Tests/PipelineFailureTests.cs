@@ -181,7 +181,7 @@ public sealed class PipelineFailureTests
     }
 
     [Fact]
-    public async Task Busy_client_gets_only_the_latest_tick_per_symbol()
+    public async Task Busy_client_gets_only_the_latest_tick_per_instrument()
     {
         var client = new GatedClient();
         using var metrics = new ServiceCollection().AddMetrics().BuildServiceProvider();
@@ -193,12 +193,15 @@ public sealed class PipelineFailureTests
         subscribers.Publish(Tick("DE", 1, "12:00"));
         await client.FirstSendStarted.WaitAsync(TimeSpan.FromSeconds(2));
         subscribers.Publish(Tick("DE", 2, "12:01"));
+        // Another contract of the same symbol, with an older timestamp: not superseded by the P60 ticks.
+        subscribers.Publish(Tick("DE", 10, "11:45", contract: "PT15"));
         subscribers.Publish(Tick("FR", 1, "12:01"));
         subscribers.Publish(Tick("DE", 3, "12:02"));
         client.Release();
 
-        await client.WaitForAsync(3, TimeSpan.FromSeconds(2));
-        Assert.Equal(["DE 1", "DE 3", "FR 1"], client.Received.Take(1).Concat(client.Received.Skip(1).Order()));
+        await client.WaitForAsync(4, TimeSpan.FromSeconds(2));
+        await Task.Delay(100);
+        Assert.Equal(["DE 1", "DE 10", "DE 3", "FR 1"], client.Received.Take(1).Concat(client.Received.Skip(1).Order()));
     }
 
     [Fact]
@@ -231,7 +234,7 @@ public sealed class PipelineFailureTests
                 new KafkaConnectionState()),
             NullLogger<ClientOutbox>.Instance);
 
-    private static PriceTick Tick(string symbol, decimal price, string time) =>
+    private static PriceTick Tick(string symbol, decimal price, string time, string contract = "P60") =>
         new(new EpexMarketData
         {
             Symbol = symbol,
@@ -240,7 +243,7 @@ public sealed class PipelineFailureTests
             Timestamp = DateTimeOffset.Parse($"2026-10-13T{time}:00Z"),
             Price = price,
             Unit = "EUR/MWh",
-            Contract = "P60",
+            Contract = contract,
         }, null);
 
     private static async Task<HttpStatusCode> StatusAsync(HttpClient http, string url)

@@ -7,6 +7,12 @@ function normalizeSymbols(symbols) {
   return [...new Set(symbols.map((s) => String(s).trim().toUpperCase()).filter(Boolean))]
 }
 
+// One symbol carries many instruments (day-ahead and intraday, hourly and quarter-hour contracts).
+// Must match the server's InstrumentKey: "newer replaces older" only applies within one instrument.
+export function instrumentKey(update) {
+  return [update?.symbol, update?.market, update?.deliveryArea, update?.contract ?? ''].join('\u001f')
+}
+
 export function usePriceStream(hubUrl) {
   const [connectionState, setConnectionState] = useState(signalR.HubConnectionState.Disconnected)
   const [updates, setUpdates] = useState([])
@@ -30,7 +36,9 @@ export function usePriceStream(hubUrl) {
     const normalized = normalizeSymbols(symbols)
     const previous = symbolsRef.current
     const removed = previous.filter((s) => !normalized.includes(s))
-    for (const symbol of removed) latestTimestampRef.current.delete(symbol)
+    for (const [key, latest] of latestTimestampRef.current) {
+      if (removed.includes(latest.symbol)) latestTimestampRef.current.delete(key)
+    }
     applySymbols(normalized)
     setRejectedSymbols([])
     const conn = connectionRef.current
@@ -70,12 +78,13 @@ export function usePriceStream(hubUrl) {
       const symbol = String(data?.symbol ?? '').toUpperCase()
       if (!symbolsRef.current.includes(symbol)) return
       // Source time is already on the payload. A late tick must not move an older price
-      // above a newer one when two sends for the same symbol pass each other.
+      // above a newer one when two sends for the same instrument pass each other.
       const incoming = Date.parse(data?.timestamp ?? '')
       if (Number.isFinite(incoming)) {
-        const latest = latestTimestampRef.current.get(symbol)
-        if (latest !== undefined && incoming < latest) return
-        latestTimestampRef.current.set(symbol, incoming)
+        const key = instrumentKey(data)
+        const latest = latestTimestampRef.current.get(key)
+        if (latest !== undefined && incoming < latest.timestamp) return
+        latestTimestampRef.current.set(key, { symbol, timestamp: incoming })
       }
       setUpdates((prev) => [{ ...data, id: crypto.randomUUID() }, ...prev].slice(0, 200))
     })

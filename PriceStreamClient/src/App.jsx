@@ -80,6 +80,7 @@ export default function App() {
                 <span className="meta">
                   {u.deliveryArea && `${u.deliveryArea} · `}
                   {u.market && `${u.market} · `}
+                  {u.contract && `${u.contract} · `}
                   {formatTime(u.timestamp)}
                 </span>
               </li>

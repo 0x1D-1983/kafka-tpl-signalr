@@ -22,11 +22,57 @@ public sealed class SnapshotTests
     public async Task In_memory_cache_keeps_the_newest_timestamp()
     {
         var cache = new InMemoryLastPriceCache();
-        await cache.SetAsync("DE", Price("DE", 2m, "2026-10-13T12:00:00Z"));
-        await cache.SetAsync("DE", Price("DE", 1m, "2026-10-13T11:00:00Z"));
+        await cache.SetAsync(Price("DE", 2m, "2026-10-13T12:00:00Z"));
+        await cache.SetAsync(Price("DE", 1m, "2026-10-13T11:00:00Z"));
 
         var cached = Assert.Single(await cache.GetAsync(["DE", "FR"]));
         Assert.Equal(2m, cached.Price);
+    }
+
+    [Fact]
+    public async Task In_memory_cache_keeps_every_instrument_of_a_symbol()
+    {
+        var cache = new InMemoryLastPriceCache();
+        await cache.SetAsync(Price("DE", 50m, "2026-10-13T12:00:00Z"));
+        await cache.SetAsync(Price("DE", 60m, "2026-10-13T12:05:00Z", market: "Intraday", contract: "PT15"));
+        // Older than the PT15 tick, but a different contract: kept.
+        await cache.SetAsync(Price("DE", 70m, "2026-10-13T11:00:00Z", market: "Intraday", contract: "P60"));
+        await cache.SetAsync(Price("DE", 65m, "2026-10-13T12:06:00Z", market: "Intraday", contract: "PT15"));
+        await cache.SetAsync(Price("FR", 40m, "2026-10-13T12:00:00Z"));
+
+        var cached = await cache.GetAsync(["DE"]);
+        Assert.Equal([70m, 50m, 65m], cached.Select(price => price.Price));
+    }
+
+    [Fact]
+    public async Task In_memory_cache_evicts_instruments_not_received_within_the_retention()
+    {
+        var clock = new ManualClock(DateTimeOffset.Parse("2026-10-16T12:00:00Z"));
+        var cache = new InMemoryLastPriceCache(TimeSpan.FromHours(1), clock);
+        await cache.SetAsync(Price("DE", 50m, "2026-10-13T12:00:00Z", contract: "expired"));
+        clock.Advance(TimeSpan.FromMinutes(45));
+        await cache.SetAsync(Price("DE", 60m, "2026-10-13T12:00:00Z", contract: "live"));
+        clock.Advance(TimeSpan.FromMinutes(30));
+
+        Assert.Equal([60m], (await cache.GetAsync(["DE"])).Select(price => price.Price));
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task Subscriber_gets_the_last_price_of_every_instrument_of_the_symbol()
+    {
+        await using var pod = await Pod.StartAsync();
+        pod.Publish(Price("DE", 55m, "2026-10-13T12:00:00Z"));
+        pod.Publish(Price("DE", 57m, "2026-10-13T12:01:00Z", market: "Intraday", contract: "PT15"));
+        await pod.WaitUntilCachedAsync("DE", 57m);
+
+        await using var client = await SnapshotClient.ConnectAsync(pod.Url);
+        await client.SubscribeAsync("DE");
+
+        var first = await client.NextAsync(TimeSpan.FromSeconds(5));
+        var second = await client.NextAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(("Day-Ahead", 55m), (first.Market, first.Price));
+        Assert.Equal(("Intraday", 57m), (second.Market, second.Price));
+        await client.ExpectNothingAsync(TimeSpan.FromMilliseconds(300));
     }
 
     [Fact(Timeout = 60_000)]
@@ -151,16 +197,23 @@ public sealed class SnapshotTests
             new TopicPartition(topic, partition),
             new Message<Null, string> { Value = JsonSerializer.Serialize(price), Timestamp = new Timestamp(kafkaTime) });
 
-    private static EpexMarketData Price(string symbol, decimal price, string timestamp) => new()
+    private static EpexMarketData Price(string symbol, decimal price, string timestamp, string market = "Day-Ahead", string contract = "P60") => new()
     {
         Symbol = symbol,
-        Market = "Day-Ahead",
+        Market = market,
         DeliveryArea = symbol,
         Timestamp = DateTimeOffset.Parse(timestamp),
         Price = price,
         Unit = "EUR/MWh",
-        Contract = "P60",
+        Contract = contract,
     };
+
+    private sealed class ManualClock(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+
+        public void Advance(TimeSpan by) => now += by;
+    }
 
     private sealed class Pod : IAsyncDisposable
     {
