@@ -47,6 +47,10 @@ The **React client** (`PriceStreamClient/`) subscribes only to the symbols submi
   - `ReplayWindowSeconds` (default 900): how far back a starting pod reads into the last-price cache. `0` starts at the latest offset with an empty cache.
   - `PartitionRefreshSeconds` (default 60): how often the topic is checked for added partitions, which are read from the beginning.
 
+- **SignalR**:
+  - `TransportSendTimeoutSeconds` (default 3): a send stuck this long closes the connection.
+- **Fan-out cost**: each tick is serialized once per connection. Sharing one serialization across connections was measured and dropped: on an M5 Pro, 1,000 connections at 50 ticks/s cost about 70 µs of CPU per delivered message either way (the difference was within noise), because the per-message write path (pipe flush, WebSocket frame, syscalls) dominates, not the JSON. `FanOutLoadTests` measures the current cost: `PRICESTREAM_LOAD_TEST=1 dotnet test --filter FanOutLoadTests`, tuned with `PRICESTREAM_LOAD_CONNECTIONS`, `PRICESTREAM_LOAD_TICKS_PER_SECOND` and `PRICESTREAM_LOAD_SECONDS`.
+
 - **LastPrice**: `RetentionHours` (default 48): an instrument this pod has not received for that long is dropped from the snapshot cache. Keep it above the longest gap between ticks of a live instrument (day-ahead is auctioned once a day).
 
 - **Subscriptions**: Limits on client input to the hub.
