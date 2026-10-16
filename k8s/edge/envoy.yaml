@@ -70,7 +70,46 @@ static_resources:
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+    # Prometheus scrape target. Only /stats/prometheus reaches the admin interface; config dumps,
+    # log levels and /quitquitquit stay on localhost.
+    - name: metrics
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 9902 }
+      # Scrapes must still get through when the client connection cap is hit.
+      ignore_global_conn_limit: true
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: metrics
+                normalize_path: true
+                merge_slashes: true
+                route_config:
+                  name: metrics
+                  virtual_hosts:
+                    - name: metrics
+                      domains: ["*"]
+                      routes:
+                        - match: { path: /stats/prometheus }
+                          route: { cluster: envoy-admin }
+                        - match: { prefix: / }
+                          direct_response: { status: 404 }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
   clusters:
+    - name: envoy-admin
+      type: STATIC
+      connect_timeout: 1s
+      load_assignment:
+        cluster_name: envoy-admin
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 9901 }
     - name: pricestream
       type: STRICT_DNS
       dns_lookup_family: V4_ONLY

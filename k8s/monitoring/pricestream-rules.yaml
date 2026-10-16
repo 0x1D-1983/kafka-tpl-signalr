@@ -3,7 +3,7 @@ groups:
     rules:
       # One pod stopped receiving while another still does, so Kafka and the producer are fine and
       # the fault is local to that pod. If every pod is stale (quiet topic, Kafka outage) this stays
-      # silent; that is a different alert.
+      # silent; PriceStreamKafkaUnreachable covers the outage.
       # Computed from the scraped series rather than a recording rule: scraped series go stale as
       # soon as a pod is gone, while a recorded age lingers for the lookback window and a replaced
       # pod's last value could keep the alert pending through a rollout.
@@ -20,3 +20,91 @@ groups:
           description: >-
             The pod stays ready and serves cached prices, so its clients see stale data.
             Check GET /health/kafka on the pod for lastError; delete the pod if it does not recover.
+
+      # Every scraped pod has lost the brokers (all brokers down, or never reached since start). A quiet
+      # topic keeps pricestream_kafka_connected at 1, since partition EOF and metadata responses count as
+      # contact, so this separates an outage from no traffic.
+      # With no pods scraped at all, max() is empty and this stays silent.
+      - alert: PriceStreamKafkaUnreachable
+        expr: max(pricestream_kafka_connected) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No PriceStream pod can reach Kafka"
+          description: >-
+            Pods stay ready and keep serving cached prices, which go stale; Kafka never gates readiness.
+            Check the Kafka pod and GET /health/kafka on a PriceStream pod for lastError.
+
+      # Every 5m window for 10m has drops, so one stray failure does not fire. backpressure means the
+      # pipeline was full and the tick was lost for every client on the pod; send_failed is one client
+      # that could not be written to; no_symbol is a producer bug.
+      - alert: PriceStreamMessagesDropped
+        expr: sum by (pod, reason) (rate(pricestream_messages_dropped_total[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.pod }} is dropping messages ({{ $labels.reason }}, {{ $value | printf "%.2f" }}/s)'
+          description: >-
+            backpressure: the pod cannot keep up; check pricestream_pipeline_queue_depth and CPU throttling.
+            send_failed: clients are failing writes; check connections and the slow-client alert.
+            no_symbol: a producer is sending messages without Symbol.
+
+      # The pod reads more slowly than the topic grows. Lag that is large but shrinking is a catch-up
+      # and does not fire. The threshold is in messages; at the mock's rate 100 is about 50s behind.
+      - alert: PriceStreamConsumerLagGrowing
+        expr: |
+          sum by (pod) (pricestream_kafka_consumer_lag) > 100
+          and
+          sum by (pod) (deriv(pricestream_kafka_consumer_lag[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.pod }} is {{ $value }} messages behind Kafka and falling further behind"
+          description: >-
+            Clients on this pod see prices late. Check CPU throttling on the pod and the
+            pricestream_pipeline_queue_depth panel; a larger replay window also lags at startup.
+
+      # A tick is superseded when a newer one for the same instrument arrives before a slow client was
+      # sent the older one. A few slow clients are normal; a jump against the pod's own last hour is
+      # many clients falling behind at once (a network problem on their side, or the pod is starved).
+      # 5/s is a handful of clients each a few ticks behind.
+      - alert: PriceStreamSlowClientWave
+        expr: |
+          sum by (pod) (rate(pricestream_outbox_superseded_total[5m])) > 5
+          and
+          sum by (pod) (rate(pricestream_outbox_superseded_total[5m]))
+            > 3 * sum by (pod) (rate(pricestream_outbox_superseded_total[1h] offset 5m))
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.pod }} is superseding {{ $value | printf "%.1f" }} ticks/s for slow clients'
+          description: >-
+            Slow clients get only the latest price per instrument, so they skip intermediate ticks.
+            If every pod shows this, suspect the clients' network; if one pod does, check its CPU.
+
+      # A client connection or request hit a limit in k8s/edge/envoy.yaml and was refused with a 503
+      # (or the connection was closed). Any overflow means the limits, the replica count or the Envoy
+      # sizing is too small for the current load.
+      - alert: EdgeEnvoyOverflow
+        expr: |
+          label_replace(sum by (pod) (rate(envoy_cluster_upstream_cx_overflow{envoy_cluster_name="pricestream"}[5m])) > 0, "limit", "upstream_connections", "", "")
+          or
+          label_replace(sum by (pod) (rate(envoy_cluster_upstream_rq_pending_overflow{envoy_cluster_name="pricestream"}[5m])) > 0, "limit", "pending_requests", "", "")
+          or
+          label_replace(sum by (pod) (rate(envoy_cluster_upstream_rq_retry_overflow{envoy_cluster_name="pricestream"}[5m])) > 0, "limit", "retries", "", "")
+          or
+          label_replace(sum by (pod) (rate(envoy_listener_downstream_global_cx_overflow{envoy_listener_address="0.0.0.0_8080"}[5m])) > 0, "limit", "downstream_connections", "", "")
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.pod }} is refusing clients: {{ $labels.limit }} limit reached ({{ $value | printf "%.2f" }}/s)'
+          description: >-
+            upstream_connections and pending_requests are the pricestream cluster circuit breakers;
+            downstream_connections is the overload manager cap; retries is the retry budget, usually
+            pods refusing connections. Add PriceStream replicas, or raise the limits together with
+            the Envoy memory limit in edge.yaml.

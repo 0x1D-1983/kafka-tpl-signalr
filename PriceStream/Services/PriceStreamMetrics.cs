@@ -42,6 +42,10 @@ public sealed class PriceStreamMetrics
         _superseded = meter.CreateCounter<long>(
             "pricestream.outbox.superseded",
             description: "Ticks replaced by a newer tick for the same symbol before a slow client was sent them.");
+        // Exported from 0 so alert rates see the first increment and have a baseline before any drop.
+        foreach (var reason in DropReason.All)
+            _dropped.Add(0, new KeyValuePair<string, object?>("reason", reason));
+        _superseded.Add(0);
         _publishLatency = meter.CreateHistogram(
             "pricestream.publish.latency",
             unit: "s",
@@ -108,4 +112,6 @@ public static class DropReason
     public const string Backpressure = "backpressure";
     public const string NoSymbol = "no_symbol";
     public const string SendFailed = "send_failed";
+
+    public static readonly string[] All = [Backpressure, NoSymbol, SendFailed];
 }

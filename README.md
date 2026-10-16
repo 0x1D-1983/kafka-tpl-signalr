@@ -68,7 +68,7 @@ kubectl port-forward -n pricestream svc/prometheus 9090:9090        # skaffold d
 kubectl port-forward -n pricestream svc/grafana 3000:3000           # skaffold dev does this too; dashboard is the home page
 ```
 
-A single Prometheus (`k8s/monitoring/`) scrapes every PriceStream pod and evaluates `PriceStreamPodDataStale`, which fires when one pod stops receiving Kafka data while the others keep going. There is no Alertmanager in kind; firing alerts are listed on <http://localhost:9090/alerts>. Grafana on <http://localhost:3000> (anonymous view; `admin`/`admin` to edit) shows the PriceStream dashboard: messages consumed, parsed, failed and dropped, pipeline queue depth, publish latency, connections, subscriptions per symbol, consumer lag and data age.
+A single Prometheus (`k8s/monitoring/`) scrapes every PriceStream pod and the edge Envoy, and evaluates the alerts in `k8s/monitoring/pricestream-rules.yaml`: one pod's data going stale, Kafka unreachable from every pod, sustained drops, growing consumer lag, a slow-client wave and Envoy overflow (see [Alerts](PriceStream/README.md)). There is no Alertmanager in kind; firing alerts are listed on <http://localhost:9090/alerts>. Grafana on <http://localhost:3000> (anonymous view; `admin`/`admin` to edit) shows the PriceStream dashboard: messages consumed, parsed, failed and dropped, pipeline queue depth, publish latency, connections, subscriptions per symbol, consumer lag and data age.
 
 The `epex-mock` deployment publishes a DE and an FR price every second (JSON shape in `PriceStream/sample-epex-messages.json`), keyed by instrument so each one stays in order (see [Message key](PriceStream/README.md#message-key-required-for-ordering)). To publish one message by hand, put the key before the `;`:
 

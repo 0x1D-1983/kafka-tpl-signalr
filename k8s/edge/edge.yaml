@@ -49,6 +49,9 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+            # /stats/prometheus only; not in the Service, and the NetworkPolicy admits only Prometheus.
+            - name: metrics
+              containerPort: 9902
           volumeMounts:
             - name: config
               mountPath: /etc/envoy
@@ -80,3 +83,23 @@ spec:
         - name: config
           configMap:
             name: edge-envoy
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: edge-envoy
+spec:
+  podSelector:
+    matchLabels:
+      app: edge-envoy
+  policyTypes: [Ingress]
+  ingress:
+    # Public: clients arrive through the NodePort with their own source IP.
+    - ports:
+        - port: http
+    - from:
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - port: metrics

@@ -20,3 +20,19 @@ scrape_configs:
         action: keep
       - source_labels: [__meta_kubernetes_pod_name]
         target_label: pod
+
+  - job_name: edge-envoy
+    metrics_path: /stats/prometheus
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          own_namespace: true
+        selectors:
+          - role: pod
+            label: app=edge-envoy
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_container_port_name]
+        regex: metrics
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod

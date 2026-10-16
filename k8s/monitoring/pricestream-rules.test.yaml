@@ -65,3 +65,156 @@ tests:
               description: >-
                 The pod stays ready and serves cached prices, so its clients see stale data.
                 Check GET /health/kafka on the pod for lastError; delete the pod if it does not recover.
+
+  - name: every pod loses Kafka
+    interval: 15s
+    input_series:
+      - series: 'pricestream_kafka_connected{pod="pricestream-a"}'
+        values: '1x4 0x20'
+      - series: 'pricestream_kafka_connected{pod="pricestream-b"}'
+        values: '1x4 0x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PriceStreamKafkaUnreachable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: PriceStreamKafkaUnreachable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "No PriceStream pod can reach Kafka"
+              description: "Pods stay ready and keep serving cached prices, which go stale; Kafka never gates readiness. Check the Kafka pod and GET /health/kafka on a PriceStream pod for lastError."
+
+  - name: one pod loses Kafka while another still reaches it
+    interval: 15s
+    input_series:
+      - series: 'pricestream_kafka_connected{pod="pricestream-a"}'
+        values: '0x20'
+      - series: 'pricestream_kafka_connected{pod="pricestream-b"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PriceStreamKafkaUnreachable
+        exp_alerts: []
+
+  - name: drops in every window for 10m
+    interval: 15s
+    input_series:
+      - series: 'pricestream_messages_dropped_total{pod="pricestream-a",reason="backpressure"}'
+        values: '0x8 0+1x60'
+      - series: 'pricestream_messages_dropped_total{pod="pricestream-a",reason="send_failed"}'
+        values: '0x68'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PriceStreamMessagesDropped
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: PriceStreamMessagesDropped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: pricestream-a
+              reason: backpressure
+            exp_annotations:
+              summary: "pricestream-a is dropping messages (backpressure, 0.07/s)"
+              description: "backpressure: the pod cannot keep up; check pricestream_pipeline_queue_depth and CPU throttling. send_failed: clients are failing writes; check connections and the slow-client alert. no_symbol: a producer is sending messages without Symbol."
+
+  - name: a single burst of drops
+    interval: 15s
+    input_series:
+      - series: 'pricestream_messages_dropped_total{pod="pricestream-a",reason="send_failed"}'
+        values: '0x8 5x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PriceStreamMessagesDropped
+        exp_alerts: []
+
+  - name: lag keeps growing
+    interval: 15s
+    input_series:
+      - series: 'pricestream_kafka_consumer_lag{pod="pricestream-a",topic="epex-market-data",partition="0"}'
+        values: '0+10x60'
+      - series: 'pricestream_kafka_consumer_lag{pod="pricestream-b",topic="epex-market-data",partition="0"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PriceStreamConsumerLagGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: pricestream-a
+            exp_annotations:
+              summary: "pricestream-a is 400 messages behind Kafka and falling further behind"
+              description: "Clients on this pod see prices late. Check CPU throttling on the pod and the pricestream_pipeline_queue_depth panel; a larger replay window also lags at startup."
+
+  - name: large lag that is shrinking is a catch-up
+    interval: 15s
+    input_series:
+      - series: 'pricestream_kafka_consumer_lag{pod="pricestream-a",topic="epex-market-data",partition="0"}'
+        values: '1000-10x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PriceStreamConsumerLagGrowing
+        exp_alerts: []
+
+  - name: superseded rate jumps against the last hour
+    interval: 1m
+    input_series:
+      # 0.1/s for 70m, then 10/s.
+      - series: 'pricestream_outbox_superseded_total{pod="pricestream-a"}'
+        values: '0+6x70 420+600x20'
+    alert_rule_test:
+      - eval_time: 72m
+        alertname: PriceStreamSlowClientWave
+        exp_alerts: []
+      - eval_time: 76m
+        alertname: PriceStreamSlowClientWave
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: pricestream-a
+            exp_annotations:
+              summary: "pricestream-a is superseding 10.0 ticks/s for slow clients"
+              description: "Slow clients get only the latest price per instrument, so they skip intermediate ticks. If every pod shows this, suspect the clients' network; if one pod does, check its CPU."
+
+  - name: a steady high superseded rate is not a wave
+    interval: 1m
+    input_series:
+      - series: 'pricestream_outbox_superseded_total{pod="pricestream-a"}'
+        values: '0+600x120'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: PriceStreamSlowClientWave
+        exp_alerts: []
+
+  - name: Envoy refuses upstream connections
+    interval: 15s
+    input_series:
+      - series: 'envoy_cluster_upstream_cx_overflow{envoy_cluster_name="pricestream",pod="edge-envoy-a"}'
+        values: '0x8 0+3x40'
+      - series: 'envoy_listener_downstream_global_cx_overflow{envoy_listener_address="0.0.0.0_8080",pod="edge-envoy-a"}'
+        values: '0x48'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: EdgeEnvoyOverflow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: edge-envoy-a
+              limit: upstream_connections
+            exp_annotations:
+              summary: "edge-envoy-a is refusing clients: upstream_connections limit reached (0.15/s)"
+              description: "upstream_connections and pending_requests are the pricestream cluster circuit breakers; downstream_connections is the overload manager cap; retries is the retry budget, usually pods refusing connections. Add PriceStream replicas, or raise the limits together with the Envoy memory limit in edge.yaml."
+
+  - name: overflow on the admin cluster or the metrics listener is ignored
+    interval: 15s
+    input_series:
+      - series: 'envoy_cluster_upstream_cx_overflow{envoy_cluster_name="envoy-admin",pod="edge-envoy-a"}'
+        values: '0+3x40'
+      - series: 'envoy_listener_downstream_global_cx_overflow{envoy_listener_address="0.0.0.0_9902",pod="edge-envoy-a"}'
+        values: '0+3x40'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: EdgeEnvoyOverflow
+        exp_alerts: []
