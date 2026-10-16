@@ -170,7 +170,7 @@ public sealed class PipelineFailureTests
         var broadcaster = running.App.Services.GetRequiredService<SignalRPriceBroadcaster>();
         var targetCompletion = Block(broadcaster, "_targetBlock").Completion;
 
-        Assert.True(pipeline.Post(new EpexMarketData { Symbol = null!, Market = "Day-Ahead", DeliveryArea = "DE", Price = 1 }));
+        Assert.True(pipeline.Post(new EpexMarketData { Symbol = null!, Market = "Day-Ahead", DeliveryArea = "DE", Timestamp = DateTimeOffset.UtcNow, Price = 1 }));
         Assert.True(pipeline.Post(Sample("DE", 42m)));
 
         await running.App.StopAsync().WaitAsync(TimeSpan.FromSeconds(3));

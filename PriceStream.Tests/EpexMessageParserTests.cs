@@ -28,6 +28,15 @@ public sealed class EpexMessageParserTests
         Assert.Equal("FR", message.Symbol);
     }
 
+    [Fact]
+    public void Property_names_are_case_insensitive()
+    {
+        var json = """{"symbol":"de","market":"Day-Ahead","deliveryArea":"DE-LU","timestamp":"2026-10-12T12:00:00+00:00","price":42.35}""";
+        Assert.True(EpexMessageParser.TryParse(Encoding.UTF8.GetBytes(json), out var message));
+        Assert.Equal("DE", message.Symbol);
+        Assert.Equal(42.35m, message.Price);
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("not json")]
@@ -39,6 +48,29 @@ public sealed class EpexMessageParserTests
     {
         Assert.False(EpexMessageParser.TryParse(Encoding.UTF8.GetBytes(json), out var message));
         Assert.Null(message);
+    }
+
+    [Theory]
+    [InlineData("\"Price\":42.35,", "")]
+    [InlineData("\"Price\":42.35,", "\"Price\":null,")]
+    [InlineData("\"Timestamp\":\"2026-10-12T12:00:00+00:00\",", "")]
+    [InlineData("\"Market\":\"Day-Ahead\",", "\"Market\":null,")]
+    [InlineData("\"DeliveryArea\":\"DE-LU\",", "\"DeliveryArea\":null,")]
+    [InlineData("\"Symbol\":\" de \",", "\"Symbol\":null,")]
+    public void Rejects_messages_with_a_missing_or_null_required_field(string field, string replacement)
+    {
+        Assert.Contains(field, Valid);
+        Assert.False(EpexMessageParser.TryParse(Encoding.UTF8.GetBytes(Valid.Replace(field, replacement)), out var message));
+        Assert.Null(message);
+    }
+
+    [Fact]
+    public void Optional_fields_may_be_null()
+    {
+        var json = Valid.Replace("\"EUR/MWh\"", "null").Replace("\"P60\"", "null");
+        Assert.True(EpexMessageParser.TryParse(Encoding.UTF8.GetBytes(json), out var message));
+        Assert.Null(message.Unit);
+        Assert.Null(message.Contract);
     }
 
     [Fact]

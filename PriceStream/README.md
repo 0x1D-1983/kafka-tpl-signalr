@@ -5,7 +5,7 @@ EPEX market data flows from Kafka through a TPL Dataflow pipeline and is exposed
 ## Architecture
 
 - **Kafka**: Single topic (e.g. `epex-market-data`). **Every pod reads every partition** and sends only to its own connections, so no backplane is needed. Partitions are assigned manually (no consumer group membership, no commits), so scaling or restarting a pod never triggers a rebalance. The cost is that Kafka read bandwidth grows with the replica count.
-- **Parsing**: The Kafka value deserializer parses JSON straight from librdkafka's buffer (`ReadOnlySpan<byte>`, source-generated `JsonSerializerContext`), with no intermediate `byte[]` or `string`. Symbols are trimmed and upper-cased there; payloads that are not valid or have no symbol are skipped.
+- **Parsing**: The Kafka value deserializer parses JSON straight from librdkafka's buffer (`ReadOnlySpan<byte>`, source-generated `JsonSerializerContext`), with no intermediate `byte[]` or `string`. Symbols are trimmed and upper-cased there; payloads that are not valid, have no symbol, or miss a required field are skipped.
 - **TPL Dataflow**: bounded queue → one fan-out block that caches the tick and hands it to each subscriber's outbox. Backpressure via bounded capacity.
 - **Per-connection outbox** (`PriceSubscribers`): each connection keeps at most one pending tick per symbol and has its own sender. SignalR groups are not used, because a group send completes only when every member's write does, so one client that stops reading would stall the pipeline for everyone. A slow client instead skips to the latest price per symbol, and a send stuck longer than `SignalR:TransportSendTimeoutSeconds` (default 3) closes its connection. `SlowClientTests` checks this under load.
 - **SignalR**: Hub `PriceStreamHub` at `/hubs/pricestream`. Methods: `Subscribe(symbols)`, `Unsubscribe(symbols)`, both returning `{ accepted, rejected: [{ symbol, reason }] }`. Clients receive `PriceUpdate` with EPEX payload.
@@ -55,14 +55,16 @@ The **React client** (`PriceStreamClient/`) subscribes only to the symbols submi
 
 ## Kafka message format
 
-JSON per message, matching `EpexMarketData`:
+JSON per message, matching `EpexMarketData`. Property names are case-insensitive.
 
 - `Symbol` (string)
 - `Market` (string)
 - `DeliveryArea` (string)
 - `Timestamp` (ISO date)
 - `Price` (number)
-- `Unit`, `Contract` (optional)
+- `Unit`, `Contract` (optional, may be null)
+
+Every field except `Unit` and `Contract` is required and must not be null. A message missing one is counted in `pricestream_kafka_messages_failed_total` and skipped, rather than broadcast with a price of 0 or a default timestamp.
 
 ## Running locally
 

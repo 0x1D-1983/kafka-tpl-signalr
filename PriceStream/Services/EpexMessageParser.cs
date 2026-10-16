@@ -47,6 +47,7 @@ public sealed class EpexMarketDataDeserializer : IDeserializer<EpexMarketData?>
         !isNull && EpexMessageParser.TryParse(data, out var message) ? message : null;
 }
 
+[JsonSourceGenerationOptions(RespectNullableAnnotations = true, PropertyNameCaseInsensitive = true)]
 [JsonSerializable(typeof(EpexMarketData))]
 internal sealed partial class EpexJsonContext : JsonSerializerContext;
 
