@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import * as signalR from '@microsoft/signalr'
 
 const STORAGE_KEY = 'pricestream-symbols'
+const START_BASE_DELAY_MS = 1000
+const START_MAX_DELAY_MS = 30000
 
 function normalizeSymbols(symbols) {
   return [...new Set(symbols.map((s) => String(s).trim().toUpperCase()).filter(Boolean))]
@@ -102,22 +104,42 @@ export function usePriceStream(hubUrl) {
       setConnectionState(signalR.HubConnectionState.Disconnected)
     })
 
+    // withAutomaticReconnect only covers a connection that was up once; the first start() is retried here.
     let stopped = false
-    connection
-      .start()
-      .then(() => {
-        if (stopped) return
-        setConnectionState(signalR.HubConnectionState.Connected)
-      })
-      .catch((err) => {
-        if (stopped) return
-        console.error('SignalR connection failed', err)
-        setConnectionState(signalR.HubConnectionState.Disconnected)
+    let retryTimer
+    let wakeRetry
+    const sleep = (ms) =>
+      new Promise((resolve) => {
+        wakeRetry = resolve
+        retryTimer = setTimeout(resolve, ms)
       })
 
+    const startWithRetry = async () => {
+      setConnectionState(signalR.HubConnectionState.Connecting)
+      for (let attempt = 0; !stopped; attempt++) {
+        try {
+          await connection.start()
+        } catch (err) {
+          if (stopped) return
+          // Full jitter, so clients that failed together (edge down, deploy) do not retry together.
+          const delay = Math.random() * Math.min(START_MAX_DELAY_MS, START_BASE_DELAY_MS * 2 ** attempt)
+          console.warn(`SignalR start failed, retrying in ${Math.round(delay)} ms`, err)
+          await sleep(delay)
+          continue
+        }
+        if (stopped) return
+        setConnectionState(signalR.HubConnectionState.Connected)
+        await resubscribe().catch((err) => console.error('Subscribe after connect failed', err))
+        return
+      }
+    }
+
     connectionRef.current = connection
+    startWithRetry()
     return () => {
       stopped = true
+      clearTimeout(retryTimer)
+      wakeRetry?.()
       connection.stop()
       connectionRef.current = null
     }
