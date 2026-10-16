@@ -88,6 +88,14 @@ spec:
             # Read into the last-price cache at startup; readiness stays false until the pod catches up.
             - name: Kafka__ReplayWindowSeconds
               value: "900"
+            # appsettings leaves AllowedSymbols empty, so any symbol matching the pattern is accepted.
+            # pricestream_subscriptions is one series per subscribed symbol and drops out at zero, so
+            # 100 connections with 50 invented symbols each are 5,000 series per pod that churn as
+            # clients come and go. This cluster publishes DE and FR.
+            - name: Subscriptions__AllowedSymbols__0
+              value: DE
+            - name: Subscriptions__AllowedSymbols__1
+              value: FR
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
