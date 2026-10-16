@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Publishes EpexMarketData JSON (PascalCase property names) for delivery areas DE and FR.
+# Publishes EpexMarketData JSON (PascalCase property names) for delivery areas DE and FR, keyed by
+# instrument (Symbol|Market|DeliveryArea|Contract) so each instrument stays on one partition, in order.
+# Each line is "<key>;<json>" for the console producer's parse.key.
 set -euo pipefail
 
 bootstrap="${KAFKA_BOOTSTRAP:-kafka:9092}"
@@ -26,8 +28,8 @@ produce() {
       local cents=$((1000 + RANDOM % 8000))
       local price
       price=$(printf '%d.%02d' $((cents / 100)) $((cents % 100)))
-      printf '{"Symbol":"%s","Market":"%s","DeliveryArea":"%s","Timestamp":"%s","Price":%s,"Unit":"EUR/MWh","Contract":"P60"}\n' \
-        "$area" "$market" "$area" "$ts" "$price"
+      printf '%s|%s|%s|P60;{"Symbol":"%s","Market":"%s","DeliveryArea":"%s","Timestamp":"%s","Price":%s,"Unit":"EUR/MWh","Contract":"P60"}\n' \
+        "$area" "$market" "$area" "$area" "$market" "$area" "$ts" "$price"
     done
     i=$((i + 1))
     sleep "$interval"
@@ -36,4 +38,5 @@ produce() {
 
 # --timeout is linger.ms (default 1000). The record timestamp is taken before lingering, so the
 # default would add up to a second to PriceStream's publish latency.
-produce | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$bootstrap" --topic "$topic" --timeout 5
+produce | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$bootstrap" --topic "$topic" --timeout 5 \
+  --property parse.key=true --property 'key.separator=;'

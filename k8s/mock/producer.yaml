@@ -1,4 +1,4 @@
-# Steady mock publisher for epex-market-data. Each tick emits one EpexMarketData record
+# Steady mock publisher for epex-market-data, keyed by instrument. Each tick emits one EpexMarketData record
 # for DeliveryArea DE and one for FR. Symbol matches the area so hub subscriptions receive them.
 apiVersion: apps/v1
 kind: Deployment

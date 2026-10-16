@@ -35,7 +35,7 @@ EPEX market data pipeline: **Kafka → TPL Dataflow → SignalR**, with a React 
    ```
    Open http://localhost:5173, subscribe to symbols (e.g. `DE`, `FR`).
 
-4. **Produce test messages** to `epex-market-data` (see `PriceStream/sample-epex-messages.json` for JSON format). Updates appear in the React app.
+4. **Produce test messages** to `epex-market-data` (see `PriceStream/sample-epex-messages.json` for JSON format), keyed by instrument as described under [Message key](PriceStream/README.md#message-key-required-for-ordering). Updates appear in the React app.
 
 ## Kubernetes (kind + Skaffold)
 
@@ -70,12 +70,14 @@ kubectl port-forward -n pricestream svc/grafana 3000:3000           # skaffold d
 
 A single Prometheus (`k8s/monitoring/`) scrapes every PriceStream pod and evaluates `PriceStreamPodDataStale`, which fires when one pod stops receiving Kafka data while the others keep going. There is no Alertmanager in kind; firing alerts are listed on <http://localhost:9090/alerts>. Grafana on <http://localhost:3000> (anonymous view; `admin`/`admin` to edit) shows the PriceStream dashboard: messages consumed, parsed, failed and dropped, pipeline queue depth, publish latency, connections, subscriptions per symbol, consumer lag and data age.
 
-The `epex-mock` deployment publishes a DE and an FR price every second (JSON shape in `PriceStream/sample-epex-messages.json`). To publish one message by hand:
+The `epex-mock` deployment publishes a DE and an FR price every second (JSON shape in `PriceStream/sample-epex-messages.json`), keyed by instrument so each one stays in order (see [Message key](PriceStream/README.md#message-key-required-for-ordering)). To publish one message by hand, put the key before the `;`:
 
 ```bash
-kubectl exec -i deploy/kafka -- /opt/kafka/bin/kafka-console-producer.sh \
-  --bootstrap-server localhost:9092 --topic epex-market-data <<'EOF'
-{"Symbol":"DE","Market":"Day-Ahead","DeliveryArea":"DE-LU","Timestamp":"2026-10-12T12:00:00+00:00","Price":42.35,"Unit":"EUR/MWh","Contract":"P60"}
+# From the mock pod: Kafka's NetworkPolicy admits only PriceStream and the mock, and the broker advertises kafka:9092.
+kubectl exec -i -n pricestream deploy/epex-mock -- /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server kafka:9092 --topic epex-market-data \
+  --property parse.key=true --property 'key.separator=;' <<'EOF'
+DE|Day-Ahead|DE-LU|P60;{"Symbol":"DE","Market":"Day-Ahead","DeliveryArea":"DE-LU","Timestamp":"2026-10-12T12:00:00+00:00","Price":42.35,"Unit":"EUR/MWh","Contract":"P60"}
 EOF
 ```
 

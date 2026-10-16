@@ -73,12 +73,30 @@ JSON per message, matching `EpexMarketData`. Property names are case-insensitive
 
 Every field except `Unit` and `Contract` is required and must not be null. A message missing one is counted in `pricestream_kafka_messages_failed_total` and skipped, rather than broadcast with a price of 0 or a default timestamp.
 
+### Message key (required for ordering)
+
+Producers must key each message by its instrument:
+
+```text
+{Symbol}|{Market}|{DeliveryArea}|{Contract}
+```
+
+For example `DE|Intraday|DE-LU|PT15`. Use the same field values as in the payload, with an empty last field when `Contract` is null (`DE|Day-Ahead|DE-LU|`).
+
+Kafka orders messages only within a partition, and the default partitioner sends every message with the same key to the same partition. Without a key, one instrument's ticks are spread over all partitions. A pod reads partitions interleaved, so live ticks would reach clients out of order. The last-price cache and the React client ignore a tick older than one already seen for the same instrument, but other clients would see prices go backwards. Routing by symbol inside the pod keeps whatever order the pod receives; it cannot repair order lost across partitions.
+
+- Keep the producer's idempotence on (the default since Kafka 3.0 clients), so retries cannot reorder a partition.
+- Adding partitions remaps keys, so ticks around the change can arrive out of order once. Add partitions rarely, preferably while the market is quiet.
+- Ticks for different instruments of one symbol may interleave in any order; "newer replaces older" is per instrument.
+
+The mock producer (`k8s/mock/generate.sh`) writes `<key>;<json>` lines for `kafka-console-producer.sh --property parse.key=true --property 'key.separator=;'`.
+
 ## Running locally
 
 1. Start Kafka and create topic `epex-market-data`.
 2. Run the backend: from `PriceStream/`, `dotnet run`. The hub is at `http://localhost:5044/hubs/pricestream` (or the port in your launchSettings).
 3. Run the **React client**: from `PriceStreamClient/`, `npm install` then `npm run dev`. Open http://localhost:5173, subscribe to symbols (e.g. `DE`, `FR`). The dev server proxies `/hubs` to the backend.
-4. Produce test messages to the Kafka topic in the same JSON shape (see `sample-epex-messages.json`) to see updates in the React app.
+4. Produce test messages to the Kafka topic in the same JSON shape (see `sample-epex-messages.json`), keyed by instrument as described under [Message key](#message-key-required-for-ordering), to see updates in the React app.
 
 ## Kubernetes
 
